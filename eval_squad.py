@@ -1,6 +1,9 @@
 import os 
 from typing import Tuple, List, Dict, Union, Any, Optional 
 from functools import partial
+from argparse import ArgumentParser, Namespace
+import shutil
+
 
 import torch
 from torch import nn 
@@ -167,18 +170,24 @@ if __name__ == "__main__":
     except: 
         pass
 
-    model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-0.6B")
-    tok = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+    parser = ArgumentParser() 
+    parser.add_argument("--hf_model_name_or_path", type=str, required=True, help="")
+    # parser.add_argumemt("")
+    args = parser.parse_args() 
+
+
+    model = AutoModelForCausalLM.from_pretrained(args.hf_model_name_or_path)
+    tok = AutoTokenizer.from_pretrained(args.hf_model_name_or_path)
 
     # if your tokenizer already supports Gist tokens, this should do nothing
     special_tokens = {"additional_special_tokens": ["<GIST>"]} 
     tok.add_special_tokens(special_tokens) 
-    model.resize_token_embeddings(len(tok))
+    # model.resize_token_embeddings(len(tok))
 
 
-    valset = load_dataset("rajpurkar/squad_v2")["validation"].select(range(100))
+    valset = load_dataset("rajpurkar/squad_v2")["validation"]#.select(range(100))
     dloader = DataLoader(valset, 
-                         batch_size=2, 
+                         batch_size=12, 
                          shuffle=False, 
                          collate_fn=partial(collate_fn, 
                                             tokenizer=tok, 
@@ -217,6 +226,17 @@ if __name__ == "__main__":
 
     all_preds = accelerator.gather_for_metrics(all_preds, True)
     all_references = accelerator.gather_for_metrics(all_references, True)
+
+    if os.path.exists("runs/eval"): 
+        shutil.rmtree("runs/eval")
+    os.makedirs("runs/eval", exist_ok=True)
+    with open("runs/eval/preds.txt", "w") as f: 
+        for p in all_preds: 
+            f.write(p["prediction_text"] + "\n")
+    with open("runs/eval/ref.txt", "w") as f: 
+        for r in all_references: 
+            write_out = r["answers"]["text"][0] + "\n" if len(r["answers"]["text"]) > 0 else "Not enough info.\n"
+            f.write(write_out)
 
     squad_v2_metric = evaluate.load("squad_v2")
     results = squad_v2_metric.compute(predictions=all_preds, references=all_references)

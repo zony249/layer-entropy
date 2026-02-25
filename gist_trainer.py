@@ -104,12 +104,12 @@ class GistTrainer(Trainer):
             self._save_checkpoint(model, trial)
             self.control = self.callback_handler.on_save(self.args, self.state, self.control)
 
-            # best_tfmr_path = os.path.join(self.args.output_dir, "best_tfmr") 
-            # if self.accelerator.unwrap_model(self.model) == self.model: 
-            #     self.model.save_pretrained(best_tfmr_path) 
-            #     self.processing_class.save_pretrained(best_tfmr_path)
-            # else: 
-            #     raise NotImplementedError("Implement saving for distributed model")
+            best_tfmr_path = os.path.join(self.args.output_dir, "best_tfmr") 
+            if self.accelerator.unwrap_model(self.model) == self.model: 
+                self.model.save_pretrained(best_tfmr_path) 
+                self.processing_class.save_pretrained(best_tfmr_path)
+            else: 
+                raise NotImplementedError("Implement saving for distributed model")
 
 
     def prediction_step(

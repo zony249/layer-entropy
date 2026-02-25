@@ -51,6 +51,7 @@ if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--eval_steps", default=500, type=int, help="number of training steps until eval")
     parser.add_argument("--gradient_accumulation_steps", default=2, type=int, help="gradient accumulation steps")
+    parser.add_argument("--output_dir", type=str, default="runs/debug")
     args = parser.parse_args()
 
     model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-0.6B")
@@ -77,7 +78,7 @@ if __name__ == "__main__":
     valset = task.get_dataset("validation").select(range(100))
 
 
-    optim = AdamW(model.parameters(), 1e-7)
+    # optim = AdamW(model.parameters(), 1e-7)
 
 
     def compute_metrics(eval_preds: EvalPrediction, 
@@ -99,19 +100,20 @@ if __name__ == "__main__":
         return results
 
     training_args = TrainingArguments(
-        output_dir="runs/debug", 
+        output_dir=args.output_dir, 
         overwrite_output_dir=True, 
         do_train=True, 
         do_eval=True, 
         do_predict=False, 
         per_device_train_batch_size=2, 
-        per_device_eval_batch_size=2, 
+        per_device_eval_batch_size=12, 
         gradient_accumulation_steps=args.gradient_accumulation_steps, 
         bf16=True, 
         bf16_full_eval=True, 
         eval_steps=args.eval_steps, 
         save_steps=args.eval_steps, 
         eval_strategy="steps", 
+        eval_delay=0, 
         save_strategy="best", 
         num_train_epochs=1, 
         remove_unused_columns=False, 
@@ -137,7 +139,8 @@ if __name__ == "__main__":
         eval_dataset=valset, 
         processing_class=tokenizer, 
         compute_metrics=partial(compute_metrics, tokenizer=tokenizer), 
-        optimizers=(optim, None), 
+        # optimizers=(optim, None), 
+        optimizer_cls_and_kwargs=(AdamW,{"params": model.parameters(), "lr": 1e-7}),
         args=training_args 
     )
     trainer.train()

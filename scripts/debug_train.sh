@@ -7,17 +7,16 @@
 #SBATCH --job-name=qwen-0.6b-finetune-squad
 #SBATCH --output=logs/%j--qwen-0.6b-finetune-squad.log
 
-export CUDA_VISIBLE_DEVICES=0 
-export HF_HOME=$SCRATCH 
+export CUDA_VISIBLE_DEVICES=4,5
+# export HF_HOME=$SCRATCH 
 # export DEBUG_MODE=1
 export WANDB_PROJECT="fourier-compression"
-export WANDB_NAME="qwen-0.6b-finetune-squad"
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export WANDB_NAME="fsdp-test"
+# export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 accelerate launch \
-    --num_processes 1 \
-    --num_machines 1 \
-    --mixed_precision=bf16 \
+    --config_file="accel_config/fsdp2.yaml" \
         distillation.py \
-        --eval_steps=200 \
+        --output_dir="runs/tests" \
+        --eval_steps=10 \
         --gradient_accumulation_steps=8 \
