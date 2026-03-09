@@ -9,8 +9,8 @@
             "type": "debugpy",
             "request": "attach",
             "connect": {
-                "host": "172.26.93.228", // Use the remote IP address
-                "port": 5678 // Must match the port on the remote machine
+                "host": "172.26.93.100", // Use the remote IP address
+                "port": 5679 // Must match the port on the remote machine
             },
             "pathMappings": [
                 {

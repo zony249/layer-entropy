@@ -72,6 +72,9 @@ class GistDataCollator(DataCollatorMixin):
         attention_mask = []
         label_ids = []
 
+        if self.tokenizer.pad_token is None: 
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
         if self.tokenizer.bos_token is None: 
             self.tokenizer.bos_token = self.tokenizer.pad_token
 

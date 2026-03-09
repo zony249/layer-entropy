@@ -25,6 +25,8 @@ from accelerate import (
     Accelerator
 )
 
+from models.modeling_qwen3 import CompQwen3ForCausalLM
+
 def apply_gist(context: List[int], 
                gist_token_id: int,  
                compression_rate: float, 
@@ -60,7 +62,7 @@ def _apply_dispersed_gist(context: List[int],
 def _apply_end_gist(context: List[int],
                     gist_token_id: int, 
                     compression_rate: float) -> torch.Tensor: 
-    num_gist_tokens = len(context) // compression_rate
+    num_gist_tokens = len(context) // int(compression_rate)
     context = context + [gist_token_id for _ in range(num_gist_tokens)] 
     return torch.tensor(context)
 
@@ -77,6 +79,7 @@ def collate_fn(batch,
                add_thinking_tags: Optional[bool] = True, 
                add_gist: Optional[bool] = False, 
                compression_rate: Optional[float] = 5., 
+               gist_scheme="end", 
                ): 
 
     contexts = []
@@ -110,7 +113,8 @@ def collate_fn(batch,
         
         ctx_tok = apply_gist(ctx_tok, 
                              gist_token_id=gist_token_id, 
-                             compression_rate=compression_rate) if add_gist else torch.tensor(ctx_tok)
+                             compression_rate=compression_rate, 
+                             gist_scheme=gist_scheme) if add_gist else torch.tensor(ctx_tok)
 
         contexts.append(ctx_tok)
         contexts_attn_mask.append(torch.ones_like(ctx_tok))
@@ -172,17 +176,39 @@ if __name__ == "__main__":
 
     parser = ArgumentParser() 
     parser.add_argument("--hf_model_name_or_path", type=str, required=True, help="")
+    parser.add_argument("--setup", type=str, choices=["pos_control", "neg_control", "fourier", "gist", "average"])
     # parser.add_argumemt("")
     args = parser.parse_args() 
 
+    if args.setup in ["pos_control", "neg_control"]:
+        model = CompQwen3ForCausalLM.from_pretrained(args.hf_model_name_or_path)
+        tok = AutoTokenizer.from_pretrained(args.hf_model_name_or_path)
 
-    model = AutoModelForCausalLM.from_pretrained(args.hf_model_name_or_path)
-    tok = AutoTokenizer.from_pretrained(args.hf_model_name_or_path)
+        model.enable_compression(tok)
+        if args.setup == "pos_control":
+            model.set_attention_mask_mode("full")
+        elif args.setup == "neg_control": 
+            model.set_attention_mask_mode("contextless")
+        gist_scheme = "end"
+    elif args.setup in ["fourier", "gist", "average"]: 
+        model = CompQwen3ForCausalLM.from_pretrained(args.hf_model_name_or_path)
+        tok = AutoTokenizer.from_pretrained(args.hf_model_name_or_path)
+        model.enable_compression(tok)
 
-    # if your tokenizer already supports Gist tokens, this should do nothing
-    special_tokens = {"additional_special_tokens": ["<GIST>"]} 
-    tok.add_special_tokens(special_tokens) 
-    # model.resize_token_embeddings(len(tok))
+        if args.setup == "fourier": 
+            model.set_attention_mask_mode("compression")
+            model.set_intermediate_transform("fourier")
+            gist_scheme = "end"
+        elif args.setup == "gist": 
+            model.set_attention_mask_mode("compression")
+            gist_scheme = "end"
+        elif args.setup == "average": 
+            model.set_attention_mask_mode("compression")
+            model.set_intermediate_transform("average")
+            gist_scheme = "dispersed"
+    else:
+        raise NotImplementedError
+    
 
 
     valset = load_dataset("rajpurkar/squad_v2")["validation"]#.select(range(100))
@@ -192,8 +218,9 @@ if __name__ == "__main__":
                          collate_fn=partial(collate_fn, 
                                             tokenizer=tok, 
                                             add_thinking_tags=True, 
-                                            add_gist=False, 
-                                            compression_rate=5.))
+                                            add_gist=True, 
+                                            compression_rate=5., 
+                                            gist_scheme=gist_scheme))
 
     accelerator = Accelerator()
     model, tok, dloader = accelerator.prepare(model, tok, dloader)
