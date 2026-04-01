@@ -41,7 +41,7 @@ if __name__ == "__main__":
         if debug_mode > 0: 
             print("starting debugger")
             import debugpy
-            debugpy.listen(("172.26.93.100", 5679))
+            debugpy.listen(("172.26.93.211", 5678))
             print("Waiting for debugger attach...")
             debugpy.wait_for_client()
     except: 
@@ -55,14 +55,14 @@ if __name__ == "__main__":
     parser.add_argument("--gradient_accumulation_steps", default=2, type=int, help="gradient accumulation steps")
     parser.add_argument("--output_dir", type=str, default="runs/debug")
     parser.add_argument("--add_gist", action="store_true", help="Whether or not to inject gist tokens")
-    parser.add_argument("--compression_rate", type=int, default=1, help="context:gist ratio")
+    parser.add_argument("--compression_rate", type=int, default=5, help="context:gist ratio")
     parser.add_argument("--attention_mask_mode", type=str, default="compression", choices=["compression", "full", "contextless"], help="context:gist ratio")
     parser.add_argument("--compression_mode", default="none", choices=["none", "fourier", "average"])
     parser.add_argument("--gist_scheme", type=str, default="end", choices=["end", "dispersed"])
+    parser.add_argument("--gist_granularity", type=int, default=1, help="Granularity of gist tokens under the dispersed scheme")
     args = parser.parse_args()
 
     assert not (args.gist_scheme == "end" and args.compression_mode == "average"), f"Averaging-based compression only supports dispersed gist tokens"
-    assert not (args.gist_scheme == "dispersed" and args.compression_mode == "fourier"), f"Fourier-based compression only supports contiguous gist tokens"
 
 
     model = CompQwen3ForCausalLM.from_pretrained("Qwen/Qwen3-0.6B")
@@ -70,14 +70,16 @@ if __name__ == "__main__":
 
     tokenizer = model.enable_compression(tokenizer)
     model.set_attention_mask_mode(args.attention_mask_mode)
-    model.set_intermediate_transform(args.compression_mode)
+    model.set_intermediate_transform(mode=args.compression_mode, 
+                                     gist_scheme=args.gist_scheme)
 
     collator = GistDataCollator(tokenizer, 
                                 gist_token_id=tokenizer.convert_tokens_to_ids("<GIST>"), 
                                 gist_scheme=args.gist_scheme, 
                                 compression_rate=args.compression_rate, 
                                 add_gist=args.add_gist, 
-                                add_thinking_tags=True)
+                                add_thinking_tags=True, 
+                                gist_granularity=args.gist_granularity)
     
     task = Squad(
         list_splits=["train", "validation"], 
@@ -120,8 +122,8 @@ if __name__ == "__main__":
         do_train=True, 
         do_eval=True, 
         do_predict=False, 
-        per_device_train_batch_size=2, 
-        per_device_eval_batch_size=2, 
+        per_device_train_batch_size=4, 
+        per_device_eval_batch_size=10, 
         gradient_accumulation_steps=args.gradient_accumulation_steps, 
         bf16=True, 
         bf16_full_eval=True, 
@@ -136,8 +138,8 @@ if __name__ == "__main__":
         metric_for_best_model="loss", 
         report_to="wandb", 
         logging_steps=10, 
-        torch_empty_cache_steps=4,
-        eval_accumulation_steps=1,
+        # torch_empty_cache_steps=4,
+        # eval_accumulation_steps=4,
         # predict_with_generate=True, 
         # generation_config=GenerationConfig(
         #     num_beams=1, 
