@@ -26,52 +26,13 @@ from accelerate import (
 )
 
 from models.modeling_qwen3 import CompQwen3ForCausalLM
+from utils import (
+    find_tok_pos, 
+    apply_dispersed_gist, 
+    apply_gist, 
+    apply_end_gist
+)
 
-def apply_gist(context: List[int], 
-               gist_token_id: int,  
-               compression_rate: float, 
-               gist_scheme: Optional[str] = "end") -> torch.Tensor: 
-    """
-    context: [seq_len]
-        post-tokenization sequence tensor
-    """
-    if gist_scheme == "dispersed": 
-        return _apply_dispersed_gist(context, 
-                                     gist_token_id, 
-                                     compression_rate)
-    elif gist_scheme == "end": 
-        return _apply_end_gist(context, 
-                               gist_token_id, 
-                               compression_rate)
-    else: 
-        raise NotImplementedError() 
-
-def _apply_dispersed_gist(context: List[int], 
-                          gist_token_id: int, 
-                          compression_rate: float) -> torch.Tensor: 
-    if len(context) == 0:
-        return torch.tensor([gist_token_id])
-    context.reverse()
-    i = 0
-    while i < len(context): 
-        context.insert(i, gist_token_id)
-        i += int(compression_rate+1)
-    context.reverse() 
-    return torch.tensor(context)
-
-def _apply_end_gist(context: List[int],
-                    gist_token_id: int, 
-                    compression_rate: float) -> torch.Tensor: 
-    num_gist_tokens = len(context) // int(compression_rate)
-    context = context + [gist_token_id for _ in range(num_gist_tokens)] 
-    return torch.tensor(context)
-
-def find_tok_pos(batched_tensor:torch.LongTensor, token_id: int) -> List[torch.Tensor]: 
-    positions = [] 
-    for i in range(len(batched_tensor)): 
-        ids = (batched_tensor[i] == token_id).nonzero(as_tuple=False).flatten()
-        positions.append(ids)
-    return positions
 
 
 def collate_fn(batch, 
@@ -80,14 +41,20 @@ def collate_fn(batch,
                add_gist: Optional[bool] = False, 
                compression_rate: Optional[float] = 5., 
                gist_scheme="end", 
-               ): 
+               gist_granularity: Optional[int] = 1
+               ) -> Tuple[BatchEncoding, List[Dict[str, Any]]]: 
+    """
+    this is a simplified version of GistDataCollator used for evaluations.
+    It does not append the answer to the end of the context + question, since the 
+    LM should generate that.
+    """
 
     contexts = []
     contexts_attn_mask = []
     questions = []
     questions_attn_mask = []
-    answers = []
-    answers_attn_mask = []
+    # answers = []
+    # answers_attn_mask = []
     input_ids = []
     attention_mask = []
     label_ids = []
@@ -114,16 +81,17 @@ def collate_fn(batch,
         ctx_tok = apply_gist(ctx_tok, 
                              gist_token_id=gist_token_id, 
                              compression_rate=compression_rate, 
-                             gist_scheme=gist_scheme) if add_gist else torch.tensor(ctx_tok)
+                             gist_scheme=gist_scheme, 
+                             gist_granularity=gist_granularity) if add_gist else torch.tensor(ctx_tok)
 
-        contexts.append(ctx_tok)
-        contexts_attn_mask.append(torch.ones_like(ctx_tok))
+        # contexts.append(ctx_tok)
+        # contexts_attn_mask.append(torch.ones_like(ctx_tok))
 
-        questions.append(que_tok)
-        questions_attn_mask.append(torch.ones_like(que_tok))
+        # questions.append(que_tok)
+        # questions_attn_mask.append(torch.ones_like(que_tok))
 
-        answers.append(ans_tok)
-        answers_attn_mask.append(torch.ones_like(ans_tok))
+        # answers.append(ans_tok)
+        # answers_attn_mask.append(torch.ones_like(ans_tok))
 
 
         inputs = torch.cat([ctx_tok, que_tok], dim=0)            
@@ -138,14 +106,14 @@ def collate_fn(batch,
         # assert len(inputs) == len(labels)
     
     #TODO: Collate them
-    contexts = pad_sequence(contexts, batch_first=True, padding_value=tokenizer.pad_token_id, padding_side="left")
-    contexts_attn_mask = pad_sequence(contexts_attn_mask, batch_first=True, padding_value=0, padding_side="left")
+    # contexts = pad_sequence(contexts, batch_first=True, padding_value=tokenizer.pad_token_id, padding_side="left")
+    # contexts_attn_mask = pad_sequence(contexts_attn_mask, batch_first=True, padding_value=0, padding_side="left")
 
-    questions = pad_sequence(questions, batch_first=True, padding_value=tokenizer.pad_token_id, padding_side="left")
-    questions_attn_mask = pad_sequence(questions_attn_mask, batch_first=True, padding_value=0, padding_side="left")
+    # questions = pad_sequence(questions, batch_first=True, padding_value=tokenizer.pad_token_id, padding_side="left")
+    # questions_attn_mask = pad_sequence(questions_attn_mask, batch_first=True, padding_value=0, padding_side="left")
 
-    answers = pad_sequence(answers, batch_first=True, padding_value=tokenizer.pad_token_id, padding_side="left")
-    answers_attn_mask = pad_sequence(answers_attn_mask, batch_first=True, padding_value=0, padding_side="left")
+    # answers = pad_sequence(answers, batch_first=True, padding_value=tokenizer.pad_token_id, padding_side="left")
+    # answers_attn_mask = pad_sequence(answers_attn_mask, batch_first=True, padding_value=0, padding_side="left")
     
     input_ids = pad_sequence(input_ids, batch_first=True, padding_value=tokenizer.pad_token_id, padding_side="left")
     attention_mask = pad_sequence(attention_mask, batch_first=True, padding_value=0, padding_side="left")
@@ -168,7 +136,7 @@ if __name__ == "__main__":
         if debug_mode > 0: 
             print("starting debugger")
             import debugpy
-            debugpy.listen(("172.26.93.228", 5678))
+            debugpy.listen(("172.26.93.138", 5678))
             print("Waiting for debugger attach...")
             debugpy.wait_for_client()
     except: 
@@ -177,6 +145,9 @@ if __name__ == "__main__":
     parser = ArgumentParser() 
     parser.add_argument("--hf_model_name_or_path", type=str, required=True, help="")
     parser.add_argument("--setup", type=str, choices=["pos_control", "neg_control", "fourier", "gist", "average"])
+    parser.add_argument("--compression_rate", type=float, default=5.)
+    parser.add_argument("--gist_scheme", type=str, default="end", choices=["end", "dispersed"])
+    parser.add_argument("--gist_granularity", type=int, default=1)
     # parser.add_argumemt("")
     args = parser.parse_args() 
 
@@ -189,7 +160,7 @@ if __name__ == "__main__":
             model.set_attention_mask_mode("full")
         elif args.setup == "neg_control": 
             model.set_attention_mask_mode("contextless")
-        gist_scheme = "end"
+        gist_scheme = args.gist_scheme
     elif args.setup in ["fourier", "gist", "average"]: 
         model = CompQwen3ForCausalLM.from_pretrained(args.hf_model_name_or_path)
         tok = AutoTokenizer.from_pretrained(args.hf_model_name_or_path)
@@ -197,15 +168,13 @@ if __name__ == "__main__":
 
         if args.setup == "fourier": 
             model.set_attention_mask_mode("compression")
-            model.set_intermediate_transform("fourier")
-            gist_scheme = "end"
+            model.set_intermediate_transform("fourier", gist_scheme=args.gist_scheme)
         elif args.setup == "gist": 
             model.set_attention_mask_mode("compression")
-            gist_scheme = "end"
         elif args.setup == "average": 
             model.set_attention_mask_mode("compression")
-            model.set_intermediate_transform("average")
-            gist_scheme = "dispersed"
+            model.set_intermediate_transform("average", gist_scheme=args.gist_scheme)
+        gist_scheme = args.gist_scheme
     else:
         raise NotImplementedError
     
@@ -219,7 +188,7 @@ if __name__ == "__main__":
                                             tokenizer=tok, 
                                             add_thinking_tags=True, 
                                             add_gist=True, 
-                                            compression_rate=5., 
+                                            compression_rate=args.compression_rate, 
                                             gist_scheme=gist_scheme))
 
     accelerator = Accelerator()
