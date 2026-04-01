@@ -19,5 +19,10 @@ accelerate launch \
     --num_processes=1 \
         distillation.py \
         --output_dir="runs/debug" \
-        --eval_steps=20 \
-        --gradient_accumulation_steps=8 \
+        --eval_steps=50 \
+        --gradient_accumulation_steps=2 \
+        --attention_mask_mode="compression" \
+        --add_gist \
+        --compression_mode="fourier" \
+        --gist_scheme="end" \
+        --compression_rate=20 \
