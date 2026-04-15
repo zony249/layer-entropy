@@ -180,9 +180,10 @@ def apply_dispersed_gist(context: List[int],
     if len(context) == 0:
         return torch.tensor([gist_token_id])
     context.reverse()
+    baseline = len(context) // gist_granularity
     i = 0
     while i < len(context): 
-        for _ in range(gist_granularity):
+        for _ in range(min(baseline, gist_granularity)):
             context.insert(i, gist_token_id)
             
         i += int(gist_granularity * (compression_rate + 1))
