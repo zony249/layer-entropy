@@ -3,6 +3,7 @@ import shutil
 from typing import Any, Tuple, List, Union, Dict, Optional 
 from argparse import Namespace, ArgumentParser
 from functools import partial
+from copy import deepcopy
 
 import numpy as np 
 import torch 
@@ -32,7 +33,7 @@ from accelerate import Accelerator
 from utils import GistDataCollator
 from data_utils.squad import Squad
 
-from models.modeling_qwen3 import CompQwen3ForCausalLM
+from models.modeling_qwen3 import Qwen3ForCausalLM, CompQwen3ForCausalLM
 
 if __name__ == "__main__": 
 
@@ -41,7 +42,7 @@ if __name__ == "__main__":
         if debug_mode > 0: 
             print("starting debugger")
             import debugpy
-            debugpy.listen(("172.26.93.211", 5678))
+            debugpy.listen(("172.26.93.134", 5678))
             print("Waiting for debugger attach...")
             debugpy.wait_for_client()
     except: 
@@ -60,6 +61,9 @@ if __name__ == "__main__":
     parser.add_argument("--compression_mode", default="none", choices=["none", "fourier", "average"])
     parser.add_argument("--gist_scheme", type=str, default="end", choices=["end", "dispersed"])
     parser.add_argument("--gist_granularity", type=int, default=1, help="Granularity of gist tokens under the dispersed scheme")
+    parser.add_argument("--entropy_model", type=str, default=None, help="Entropy model to help guide gist dispersion")
+    parser.add_argument("--surprise_mode", type=str, default="entropy", choices=["entropy", "ce"])
+    parser.add_argument("--entropy_model_temp", type=float, default=1)
     args = parser.parse_args()
 
     assert not (args.gist_scheme == "end" and args.compression_mode == "average"), f"Averaging-based compression only supports dispersed gist tokens"
@@ -72,6 +76,12 @@ if __name__ == "__main__":
     model.set_attention_mask_mode(args.attention_mask_mode)
     model.set_intermediate_transform(mode=args.compression_mode, 
                                      gist_scheme=args.gist_scheme)
+    entropy_model = None
+    if args.entropy_model is not None:
+        if args.entropy_model == "self":
+            entropy_model = model
+        else:
+            entropy_model = AutoModelForCausalLM.from_pretrained(args.entropy_model).cuda()
 
     collator = GistDataCollator(tokenizer, 
                                 gist_token_id=tokenizer.convert_tokens_to_ids("<GIST>"), 
@@ -79,7 +89,10 @@ if __name__ == "__main__":
                                 compression_rate=args.compression_rate, 
                                 add_gist=args.add_gist, 
                                 add_thinking_tags=True, 
-                                gist_granularity=args.gist_granularity)
+                                gist_granularity=args.gist_granularity, 
+                                entropy_model=entropy_model, 
+                                surprise_mode=args.surprise_mode, 
+                                temp=args.entropy_model_temp)
     
     task = Squad(
         list_splits=["train", "validation"], 
