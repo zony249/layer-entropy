@@ -15,7 +15,8 @@ from transformers import (
     AutoModelForCausalLM, 
     AutoTokenizer, 
     PreTrainedTokenizer, 
-    BatchEncoding
+    BatchEncoding, 
+    PreTrainedModel, 
 )
 
 from datasets import load_dataset
@@ -30,7 +31,8 @@ from utils import (
     find_tok_pos, 
     apply_dispersed_gist, 
     apply_gist, 
-    apply_end_gist
+    apply_end_gist, 
+    compute_surprise
 )
 
 
@@ -41,13 +43,57 @@ def collate_fn(batch,
                add_gist: Optional[bool] = False, 
                compression_rate: Optional[float] = 5., 
                gist_scheme="end", 
-               gist_granularity: Optional[int] = 1
+               gist_granularity: Optional[int] = 1,
+               entropy_model: Optional[PreTrainedModel] = None, 
+               surprise_mode: Optional[str] = "entropy", 
                ) -> Tuple[BatchEncoding, List[Dict[str, Any]]]: 
     """
     this is a simplified version of GistDataCollator used for evaluations.
     It does not append the answer to the end of the context + question, since the 
     LM should generate that.
     """
+
+    if tokenizer.pad_token is None: 
+        tokenizer.pad_token = tokenizer.eos_token
+
+    if tokenizer.bos_token is None: 
+        tokenizer.bos_token = tokenizer.pad_token
+
+    gist_token_id = tokenizer.convert_tokens_to_ids("<GIST>")
+
+    contexts = [example["context"] for example in batch] 
+    tok_outputs = tokenizer(contexts, return_tensors="pt", padding=True, padding_side="left")
+    tok_outputs_unpadded = tokenizer(contexts)
+
+    if entropy_model is not None: 
+        tok_outputs = tok_outputs.to(entropy_model.device)
+        inputs = {"input_ids": tok_outputs["input_ids"],
+                    "labels": tok_outputs["input_ids"], 
+                    "attention_mask":  tok_outputs["attention_mask"]}
+        surprises = compute_surprise(inputs, entropy_model, tokenizer, 
+                                        surprise_mode=surprise_mode).cpu()
+        
+    # potentially insert gist, then de-pad
+    for i in range(len(batch)): 
+        
+        #shorten surprise sequence, as we don't care about padding
+        len_seq = len(tok_outputs_unpadded["input_ids"][i])
+        unpadded_len = len(tok_outputs["input_ids"][i])
+        unpadded_seq = tok_outputs["input_ids"][i][unpadded_len - len_seq:]
+        surprise = surprises[i][unpadded_len - len_seq:] if entropy_model is not None else None
+
+        padded_seq_with_gist = apply_gist(unpadded_seq.tolist(), 
+            gist_scheme=gist_scheme, 
+            gist_token_id=gist_token_id, 
+            compression_rate=compression_rate, 
+            gist_granularity=gist_granularity, 
+            surprises=surprise) if add_gist else unpadded_seq
+        
+    
+        batch[i]["context"] = tokenizer.decode(padded_seq_with_gist)              
+        pass
+
+
 
     contexts = []
     contexts_attn_mask = []
@@ -61,7 +107,6 @@ def collate_fn(batch,
 
     references = []
 
-    gist_token_id = tokenizer.convert_tokens_to_ids("<GIST>")
     if tokenizer.bos_token is None: 
         tokenizer.bos_token = tokenizer.pad_token
 
@@ -72,17 +117,17 @@ def collate_fn(batch,
         que += "\n\nAnswer: "
         ans = example["answers"]["text"][0]  + tokenizer.eos_token if len(example["answers"]["text"]) > 0  else "" 
 
-        ctx_tok = tokenizer(ctx)["input_ids"]
+        ctx_tok = tokenizer(ctx, return_tensors="pt")["input_ids"][0]
         que_tok = tokenizer(que, return_tensors="pt")["input_ids"][0]
         ans_tok = tokenizer(ans, return_tensors="pt")["input_ids"][0]
 
         references.append({"answers": example["answers"], "id": example["id"]})
         
-        ctx_tok = apply_gist(ctx_tok, 
-                             gist_token_id=gist_token_id, 
-                             compression_rate=compression_rate, 
-                             gist_scheme=gist_scheme, 
-                             gist_granularity=gist_granularity) if add_gist else torch.tensor(ctx_tok)
+        # ctx_tok = apply_gist(ctx_tok, 
+        #                      gist_token_id=gist_token_id, 
+        #                      compression_rate=compression_rate, 
+        #                      gist_scheme=gist_scheme, 
+        #                      gist_granularity=gist_granularity) if add_gist else torch.tensor(ctx_tok)
 
         # contexts.append(ctx_tok)
         # contexts_attn_mask.append(torch.ones_like(ctx_tok))
@@ -136,7 +181,7 @@ if __name__ == "__main__":
         if debug_mode > 0: 
             print("starting debugger")
             import debugpy
-            debugpy.listen(("172.26.93.138", 5678))
+            debugpy.listen(("172.26.93.230", 5678))
             print("Waiting for debugger attach...")
             debugpy.wait_for_client()
     except: 
@@ -148,6 +193,8 @@ if __name__ == "__main__":
     parser.add_argument("--compression_rate", type=float, default=5.)
     parser.add_argument("--gist_scheme", type=str, default="end", choices=["end", "dispersed"])
     parser.add_argument("--gist_granularity", type=int, default=1)
+    parser.add_argument("--entropy_model", type=str, default=None)
+    parser.add_argument("--surprise_mode", type=str, default="entropy", choices=["entropy", "ce"])
     # parser.add_argumemt("")
     args = parser.parse_args() 
 
@@ -179,6 +226,13 @@ if __name__ == "__main__":
         raise NotImplementedError
     
 
+    if args.entropy_model is not None: 
+        if args.entropy_model == "self": 
+            pass 
+        else: 
+            entropy_model = AutoModelForCausalLM.from_pretrained(args.entropy_model)
+
+
 
     valset = load_dataset("rajpurkar/squad_v2")["validation"]#.select(range(100))
     dloader = DataLoader(valset, 
@@ -189,7 +243,9 @@ if __name__ == "__main__":
                                             add_thinking_tags=True, 
                                             add_gist=True, 
                                             compression_rate=args.compression_rate, 
-                                            gist_scheme=gist_scheme))
+                                            gist_scheme=gist_scheme, 
+                                            gist_granularity=args.gist_granularity, 
+                                            ))
 
     accelerator = Accelerator()
     model, tok, dloader = accelerator.prepare(model, tok, dloader)
