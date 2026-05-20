@@ -32,8 +32,10 @@ from utils import (
     apply_dispersed_gist, 
     apply_gist, 
     apply_end_gist, 
-    compute_surprise
+    compute_surprise, 
+    align_special_tokens
 )
+from exp_args import parse_exp_args, join_args
 
 
 
@@ -94,13 +96,7 @@ def collate_fn(batch,
         pass
 
 
-
     contexts = []
-    contexts_attn_mask = []
-    questions = []
-    questions_attn_mask = []
-    # answers = []
-    # answers_attn_mask = []
     input_ids = []
     attention_mask = []
     label_ids = []
@@ -122,43 +118,15 @@ def collate_fn(batch,
         ans_tok = tokenizer(ans, return_tensors="pt")["input_ids"][0]
 
         references.append({"answers": example["answers"], "id": example["id"]})
-        
-        # ctx_tok = apply_gist(ctx_tok, 
-        #                      gist_token_id=gist_token_id, 
-        #                      compression_rate=compression_rate, 
-        #                      gist_scheme=gist_scheme, 
-        #                      gist_granularity=gist_granularity) if add_gist else torch.tensor(ctx_tok)
-
-        # contexts.append(ctx_tok)
-        # contexts_attn_mask.append(torch.ones_like(ctx_tok))
-
-        # questions.append(que_tok)
-        # questions_attn_mask.append(torch.ones_like(que_tok))
-
-        # answers.append(ans_tok)
-        # answers_attn_mask.append(torch.ones_like(ans_tok))
 
 
         inputs = torch.cat([ctx_tok, que_tok], dim=0)            
         input_ids.append(inputs) 
         attention_mask.append(torch.ones_like(inputs))
 
-        # labels = torch.cat([torch.ones_like(ctx_tok) * -100, 
-        #                     torch.ones_like(que_tok) * -100, 
-        #                     ans_tok], dim=0) 
         labels = ans_tok
         label_ids.append(labels) 
-        # assert len(inputs) == len(labels)
     
-    #TODO: Collate them
-    # contexts = pad_sequence(contexts, batch_first=True, padding_value=tokenizer.pad_token_id, padding_side="left")
-    # contexts_attn_mask = pad_sequence(contexts_attn_mask, batch_first=True, padding_value=0, padding_side="left")
-
-    # questions = pad_sequence(questions, batch_first=True, padding_value=tokenizer.pad_token_id, padding_side="left")
-    # questions_attn_mask = pad_sequence(questions_attn_mask, batch_first=True, padding_value=0, padding_side="left")
-
-    # answers = pad_sequence(answers, batch_first=True, padding_value=tokenizer.pad_token_id, padding_side="left")
-    # answers_attn_mask = pad_sequence(answers_attn_mask, batch_first=True, padding_value=0, padding_side="left")
     
     input_ids = pad_sequence(input_ids, batch_first=True, padding_value=tokenizer.pad_token_id, padding_side="left")
     attention_mask = pad_sequence(attention_mask, batch_first=True, padding_value=0, padding_side="left")
@@ -189,41 +157,23 @@ if __name__ == "__main__":
 
     parser = ArgumentParser() 
     parser.add_argument("--hf_model_name_or_path", type=str, required=True, help="")
-    parser.add_argument("--setup", type=str, choices=["pos_control", "neg_control", "fourier", "gist", "average"])
-    parser.add_argument("--compression_rate", type=float, default=5.)
-    parser.add_argument("--gist_scheme", type=str, default="end", choices=["end", "dispersed"])
-    parser.add_argument("--gist_granularity", type=int, default=1)
-    parser.add_argument("--entropy_model", type=str, default=None)
-    parser.add_argument("--surprise_mode", type=str, default="entropy", choices=["entropy", "ce"])
-    # parser.add_argumemt("")
-    args = parser.parse_args() 
+    args, _ = parser.parse_known_args() 
+    experiment_args = parse_exp_args()
+    args = join_args(experiment_args, args)
 
-    if args.setup in ["pos_control", "neg_control"]:
-        model = CompQwen3ForCausalLM.from_pretrained(args.hf_model_name_or_path)
-        tok = AutoTokenizer.from_pretrained(args.hf_model_name_or_path)
 
-        model.enable_compression(tok)
-        if args.setup == "pos_control":
-            model.set_attention_mask_mode("full")
-        elif args.setup == "neg_control": 
-            model.set_attention_mask_mode("contextless")
-        gist_scheme = args.gist_scheme
-    elif args.setup in ["fourier", "gist", "average"]: 
-        model = CompQwen3ForCausalLM.from_pretrained(args.hf_model_name_or_path)
-        tok = AutoTokenizer.from_pretrained(args.hf_model_name_or_path)
-        model.enable_compression(tok)
+    model = CompQwen3ForCausalLM.from_pretrained(args.hf_model_name_or_path)
+    tok = AutoTokenizer.from_pretrained(args.hf_model_name_or_path)
+    model.enable_compression(tok)
 
-        if args.setup == "fourier": 
-            model.set_attention_mask_mode("compression")
-            model.set_intermediate_transform("fourier", gist_scheme=args.gist_scheme)
-        elif args.setup == "gist": 
-            model.set_attention_mask_mode("compression")
-        elif args.setup == "average": 
-            model.set_attention_mask_mode("compression")
-            model.set_intermediate_transform("average", gist_scheme=args.gist_scheme)
-        gist_scheme = args.gist_scheme
-    else:
-        raise NotImplementedError
+    align_special_tokens(tok, model)
+
+    model.set_attention_mask_mode(args.attention_mask_mode) #full, contextless, or compression
+    model.set_intermediate_transform(
+        args.compression_mode, # fourier, average, none
+        args.gist_scheme # end, dispersed
+    )
+
     
 
     if args.entropy_model is not None: 
@@ -231,6 +181,7 @@ if __name__ == "__main__":
             pass 
         else: 
             entropy_model = AutoModelForCausalLM.from_pretrained(args.entropy_model)
+            align_special_tokens(tok, entropy_model)
 
 
 
@@ -243,7 +194,7 @@ if __name__ == "__main__":
                                             add_thinking_tags=True, 
                                             add_gist=True, 
                                             compression_rate=args.compression_rate, 
-                                            gist_scheme=gist_scheme, 
+                                            gist_scheme=args.gist_scheme, 
                                             gist_granularity=args.gist_granularity, 
                                             ))
 

@@ -245,7 +245,7 @@ class GistDataCollator(DataCollatorMixin):
                                         surprise_mode=self.surprise_mode, 
                                         temp=self.temp).cpu()
         
-        uniform_gist = []
+        # uniform_gist = []
         # potentially insert gist, then de-pad
         for i in range(len(batch)): 
             
@@ -263,13 +263,13 @@ class GistDataCollator(DataCollatorMixin):
                 surprises=surprise) if self.add_gist else unpadded_seq
 
             
-            unif_gist = apply_gist(unpadded_seq.tolist(), 
-                gist_scheme=self.gist_scheme, 
-                gist_token_id=self.gist_token_id, 
-                compression_rate=self.compression_rate, 
-                gist_granularity=self.gist_granularity) if self.add_gist else unpadded_seq
+            # unif_gist = apply_gist(unpadded_seq.tolist(), 
+            #     gist_scheme=self.gist_scheme, 
+            #     gist_token_id=self.gist_token_id, 
+            #     compression_rate=self.compression_rate, 
+            #     gist_granularity=self.gist_granularity) if self.add_gist else unpadded_seq
 
-            uniform_gist.append(self.tokenizer.decode(unif_gist))
+            # uniform_gist.append(self.tokenizer.decode(unif_gist))
         
             batch[i]["context"] = self.tokenizer.decode(padded_seq_with_gist)              
             pass

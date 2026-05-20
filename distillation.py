@@ -34,37 +34,38 @@ from utils import GistDataCollator
 from data_utils.squad import Squad
 
 from models.modeling_qwen3 import Qwen3ForCausalLM, CompQwen3ForCausalLM
-
-if __name__ == "__main__": 
-
-    try: 
-        debug_mode = int(os.environ["DEBUG_MODE"]) 
-        if debug_mode > 0: 
-            print("starting debugger")
-            import debugpy
-            debugpy.listen(("172.26.93.134", 5678))
-            print("Waiting for debugger attach...")
-            debugpy.wait_for_client()
-    except: 
-        pass
-
-    os.environ["WANDB_PROJECT"]="fourier-compression"
+from exp_args import parse_exp_args, join_args
 
 
+def parse_training_args() -> Namespace: 
     parser = ArgumentParser()
     parser.add_argument("--eval_steps", default=500, type=int, help="number of training steps until eval")
     parser.add_argument("--gradient_accumulation_steps", default=2, type=int, help="gradient accumulation steps")
     parser.add_argument("--output_dir", type=str, default="runs/debug")
-    parser.add_argument("--add_gist", action="store_true", help="Whether or not to inject gist tokens")
-    parser.add_argument("--compression_rate", type=int, default=5, help="context:gist ratio")
-    parser.add_argument("--attention_mask_mode", type=str, default="compression", choices=["compression", "full", "contextless"], help="context:gist ratio")
-    parser.add_argument("--compression_mode", default="none", choices=["none", "fourier", "average"])
-    parser.add_argument("--gist_scheme", type=str, default="end", choices=["end", "dispersed"])
-    parser.add_argument("--gist_granularity", type=int, default=1, help="Granularity of gist tokens under the dispersed scheme")
-    parser.add_argument("--entropy_model", type=str, default=None, help="Entropy model to help guide gist dispersion")
-    parser.add_argument("--surprise_mode", type=str, default="entropy", choices=["entropy", "ce"])
-    parser.add_argument("--entropy_model_temp", type=float, default=1)
-    args = parser.parse_args()
+
+    args, unknown = parser.parse_known_args()
+    return args
+
+
+if __name__ == "__main__": 
+
+    # try: 
+    debug_mode = int(os.environ["DEBUG_MODE"]) 
+    if debug_mode > 0: 
+        print("starting debugger")
+        import debugpy
+        debugpy.listen(("0.0.0.0", 5679))
+        print("Waiting for debugger attach...")
+        debugpy.wait_for_client()
+    # except: 
+    #     pass
+
+    os.environ["WANDB_PROJECT"]="fourier-compression"
+
+
+    general_args = parse_training_args()
+    experiment_args = parse_exp_args() 
+    args = join_args(general_args, experiment_args)
 
     assert not (args.gist_scheme == "end" and args.compression_mode == "average"), f"Averaging-based compression only supports dispersed gist tokens"
 
@@ -170,7 +171,7 @@ if __name__ == "__main__":
         processing_class=tokenizer, 
         compute_metrics=None, #partial(compute_metrics, tokenizer=tokenizer), 
         # optimizers=(optim, None), 
-        optimizer_cls_and_kwargs=(AdamW,{"params": model.parameters(), "lr": 5e-7}),
+        optimizer_cls_and_kwargs=(AdamW,{"params": model.parameters(), "lr": 8e-6}),
         args=training_args 
     )
     trainer.train()
