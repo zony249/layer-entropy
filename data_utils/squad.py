@@ -21,7 +21,7 @@ class Squad(AbstractTask):
             return {split:self.datasets[split] for split in list_splits}
         
         if self.load_local: 
-            all_dset = load_from_disk(self.load_local)
+            all_dset = load_from_disk(self.local_dir)
         else: 
             all_dset = load_dataset("rajpurkar/squad_v2")
 

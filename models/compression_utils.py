@@ -340,28 +340,28 @@ if __name__ == "__main__":
                                    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1], 
                                    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]], dtype=torch.long)
 
-    context_start = find_context_start(input_ids, pad_token_id=0)
+    # context_start = find_context_start(input_ids, pad_token_id=0)
     pass
 
     # position_ids = torch.arange(0, input_ids.shape[1])[None, :]
 
     # mod_pos_id = disperse_position_ids(position_ids, idx, context_start)
 
-    # create_causal_gist_mask(attention_mask, idx)
+    M = create_causal_gist_mask(attention_mask, idx)
     # create_causal_gist_mask_for_generation(attention_mask, 3, idx)
     # create_contextless_mask(attention_mask, idx)
     # create_contextless_mask_for_generation(attention_mask, 3, idx)
 
-    hidden_states = torch.randn((2, 16, 128))
-    hidden_states[[0, 0, 0, 0, 0, 0], [3, 4, 8, 9, 13, 14]] = -100
-    hidden_states[[1, 1, 1], [4, 8, 12]] = -100
-    gist_idx = [torch.tensor([3, 4, 8, 9, 13, 14]), torch.tensor([4, 8, 12])] 
+    # hidden_states = torch.randn((2, 16, 128))
+    # hidden_states[[0, 0, 0, 0, 0, 0], [3, 4, 8, 9, 13, 14]] = -100
+    # hidden_states[[1, 1, 1], [4, 8, 12]] = -100
+    # gist_idx = [torch.tensor([3, 4, 8, 9, 13, 14]), torch.tensor([4, 8, 12])] 
     # hidden_states[[0, 0, 0], [4, 8, 12]] = -100
     # gist_idx = [torch.tensor([4, 8, 12]), torch.empty((0))] 
-    context_start = [torch.tensor([0]), torch.tensor([0])]
+    # context_start = [torch.tensor([0]), torch.tensor([0])]
     # hidden_compressed = fourier_transform_compress(hidden_states, gist_idx=gist_idx)
     # hidden_compressed = average_compress(hidden_states, gist_idx)
 
-    outputs = fourier_transform_chunk_compress(hidden_states, gist_idx, context_start)
+    # outputs = fourier_transform_chunk_compress(hidden_states, gist_idx, context_start)
 
     pass
