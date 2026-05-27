@@ -16,13 +16,15 @@ accelerate launch \
     --num_machines 1 \
     --mixed_precision=bf16 \
         eval_squad.py \
-        --hf_model_name_or_path Qwen/Qwen3-0.6B \
+        --hf_model_name_or_path /home/zonglin1/scratch/runs/qwen-act-guided-compress-averaging-cr-5/best_tfmr \
         --add_gist \
         --compression_rate=5 \
         --attention_mask_mode=compression \
-        --compression_mode=none \
+        --compression_mode=average \
         --gist_scheme=dispersed \
         --gist_granularity=1 \
+        --act_guided_chunking=normdiff \
+        --chunking_model=Qwen/Qwen3-0.6B \
         # --entropy_model=Qwen/Qwen3-0.6B \
         # --surprise_mode=ce \
         # --entropy_model_temp=1 \

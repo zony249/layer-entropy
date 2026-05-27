@@ -17,6 +17,12 @@ accelerate launch \
     --mixed_precision=bf16 \
         visualizations.py \
         --model_1 "Qwen/Qwen3-0.6B" \
-        --model_2 "runs/qwen-fourier-compress-cr-10/best_tfmr" \
-        --setup="fourier" \
-        --compression_rate=10 \
+        --model_2 /home/zonglin1/scratch/runs/qwen-act-guided-compress-cr-5/best_tfmr \
+        --add_gist \
+        --compression_rate=5 \
+        --attention_mask_mode=compression \
+        --compression_mode=average \
+        --gist_scheme=dispersed \
+        --gist_granularity=1 \
+        # --act_guided_chunking=normdiff \
+        # --chunking_model=Qwen/Qwen3-0.6B \
