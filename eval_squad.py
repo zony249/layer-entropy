@@ -33,7 +33,8 @@ from utils import (
     apply_gist, 
     apply_end_gist, 
     compute_surprise, 
-    align_special_tokens
+    align_special_tokens, 
+    compute_norm_of_diffs
 )
 from exp_args import parse_exp_args, join_args
 
@@ -46,8 +47,10 @@ def collate_fn(batch,
                compression_rate: Optional[float] = 5., 
                gist_scheme="end", 
                gist_granularity: Optional[int] = 1,
-               entropy_model: Optional[PreTrainedModel] = None, 
-               surprise_mode: Optional[str] = "entropy", 
+               entropy_model: Optional[PreTrainedModel] = None, # Deprecated
+               surprise_mode: Optional[str] = "entropy", # Deprecated
+               act_guided_chunking: Optional[str] = "none", 
+               chunking_model: Optional[PreTrainedModel] = "none", 
                ) -> Tuple[BatchEncoding, List[Dict[str, Any]]]: 
     """
     this is a simplified version of GistDataCollator used for evaluations.
@@ -60,6 +63,8 @@ def collate_fn(batch,
 
     if tokenizer.bos_token is None: 
         tokenizer.bos_token = tokenizer.pad_token
+    
+    act_guided_chunking = None if act_guided_chunking == "none" else act_guided_chunking
 
     gist_token_id = tokenizer.convert_tokens_to_ids("<GIST>")
 
@@ -67,13 +72,21 @@ def collate_fn(batch,
     tok_outputs = tokenizer(contexts, return_tensors="pt", padding=True, padding_side="left")
     tok_outputs_unpadded = tokenizer(contexts)
 
-    if entropy_model is not None: 
-        tok_outputs = tok_outputs.to(entropy_model.device)
+    if False:
+        if entropy_model is not None: 
+            tok_outputs = tok_outputs.to(entropy_model.device)
+            inputs = {"input_ids": tok_outputs["input_ids"],
+                        "labels": tok_outputs["input_ids"], 
+                        "attention_mask":  tok_outputs["attention_mask"]}
+            surprises = compute_surprise(inputs, entropy_model, tokenizer, 
+                                            surprise_mode=surprise_mode).cpu()
+
+    if act_guided_chunking is not None: 
+        tok_outputs = tok_outputs.to(chunking_model.device)
         inputs = {"input_ids": tok_outputs["input_ids"],
                     "labels": tok_outputs["input_ids"], 
                     "attention_mask":  tok_outputs["attention_mask"]}
-        surprises = compute_surprise(inputs, entropy_model, tokenizer, 
-                                        surprise_mode=surprise_mode).cpu()
+        act_signals = compute_norm_of_diffs(inputs, chunking_model, None, act_guided_chunking)
         
     # potentially insert gist, then de-pad
     for i in range(len(batch)): 
@@ -82,14 +95,17 @@ def collate_fn(batch,
         len_seq = len(tok_outputs_unpadded["input_ids"][i])
         unpadded_len = len(tok_outputs["input_ids"][i])
         unpadded_seq = tok_outputs["input_ids"][i][unpadded_len - len_seq:]
-        surprise = surprises[i][unpadded_len - len_seq:] if entropy_model is not None else None
+        surprise = None # surprises[i][unpadded_len - len_seq:] if entropy_model is not None else None
+        act_sig = act_signals[i][unpadded_len - len_seq:] if act_guided_chunking is not None else None 
 
         padded_seq_with_gist = apply_gist(unpadded_seq.tolist(), 
             gist_scheme=gist_scheme, 
             gist_token_id=gist_token_id, 
             compression_rate=compression_rate, 
             gist_granularity=gist_granularity, 
-            surprises=surprise) if add_gist else unpadded_seq
+            surprises=surprise, 
+            act_guided_chunking=act_guided_chunking, 
+            act_signal=act_sig) if add_gist else unpadded_seq
         
     
         batch[i]["context"] = tokenizer.decode(padded_seq_with_gist)              
@@ -176,12 +192,21 @@ if __name__ == "__main__":
 
     
 
-    if args.entropy_model is not None: 
-        if args.entropy_model == "self": 
+    if False:
+        if args.entropy_model is not None: 
+            if args.entropy_model == "self": 
+                pass 
+            else: 
+                entropy_model = AutoModelForCausalLM.from_pretrained(args.entropy_model)
+                align_special_tokens(tok, entropy_model)
+
+    if args.act_guided_chunking != "none": 
+        assert args.chunking_model is not None, f"if act_guided_chunking is specified, then chunking_model must also be specified"
+        if args.chunking_model == "self": 
             pass 
         else: 
-            entropy_model = AutoModelForCausalLM.from_pretrained(args.entropy_model)
-            align_special_tokens(tok, entropy_model)
+            chunking_model = AutoModelForCausalLM.from_pretrained(args.chunking_model).cuda()
+            align_special_tokens(tok, chunking_model)
 
 
 
@@ -196,6 +221,8 @@ if __name__ == "__main__":
                                             compression_rate=args.compression_rate, 
                                             gist_scheme=args.gist_scheme, 
                                             gist_granularity=args.gist_granularity, 
+                                            act_guided_chunking=args.act_guided_chunking, 
+                                            chunking_model=chunking_model
                                             ))
 
     accelerator = Accelerator()
