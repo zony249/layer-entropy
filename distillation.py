@@ -50,13 +50,13 @@ def parse_training_args() -> Namespace:
 if __name__ == "__main__": 
 
     # try: 
-    debug_mode = int(os.environ["DEBUG_MODE"]) 
-    if debug_mode > 0: 
-        print("starting debugger")
-        import debugpy
-        debugpy.listen(("0.0.0.0", 5679))
-        print("Waiting for debugger attach...")
-        debugpy.wait_for_client()
+    # debug_mode = int(os.environ["DEBUG_MODE"]) 
+    # if debug_mode > 0: 
+    #     print("starting debugger")
+    #     import debugpy
+    #     debugpy.listen(("0.0.0.0", 5678))
+    #     print("Waiting for debugger attach...")
+    #     debugpy.wait_for_client()
     # except: 
     #     pass
 
@@ -77,12 +77,21 @@ if __name__ == "__main__":
     model.set_attention_mask_mode(args.attention_mask_mode)
     model.set_intermediate_transform(mode=args.compression_mode, 
                                      gist_scheme=args.gist_scheme)
+
+    # TODO: Deprecate this
     entropy_model = None
     if args.entropy_model is not None:
         if args.entropy_model == "self":
             entropy_model = model
         else:
             entropy_model = AutoModelForCausalLM.from_pretrained(args.entropy_model).cuda()
+
+    chunking_model = None
+    if args.chunking_model is not None:
+        if args.chunking_model == "self":
+            chunking_model = model
+        else:
+            chunking_model = AutoModelForCausalLM.from_pretrained(args.chunking_model).cuda()
 
     collator = GistDataCollator(tokenizer, 
                                 gist_token_id=tokenizer.convert_tokens_to_ids("<GIST>"), 
@@ -93,7 +102,9 @@ if __name__ == "__main__":
                                 gist_granularity=args.gist_granularity, 
                                 entropy_model=entropy_model, 
                                 surprise_mode=args.surprise_mode, 
-                                temp=args.entropy_model_temp)
+                                temp=args.entropy_model_temp, 
+                                act_guided_chunking=args.act_guided_chunking, 
+                                chunking_model=chunking_model)
     
     task = Squad(
         list_splits=["train", "validation"], 
@@ -171,7 +182,7 @@ if __name__ == "__main__":
         processing_class=tokenizer, 
         compute_metrics=None, #partial(compute_metrics, tokenizer=tokenizer), 
         # optimizers=(optim, None), 
-        optimizer_cls_and_kwargs=(AdamW,{"params": model.parameters(), "lr": 8e-6}),
+        optimizer_cls_and_kwargs=(AdamW,{"params": model.parameters(), "lr": 5e-7}),
         args=training_args 
     )
     trainer.train()
