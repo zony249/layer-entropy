@@ -14,9 +14,19 @@ def parse_exp_args() -> Namespace:
     parser.add_argument("--compression_mode", default="none", choices=["none", "fourier", "average"], help="deterministic function used for compression. For learned compression, select 'none'")
     parser.add_argument("--gist_scheme", type=str, default="end", choices=["end", "dispersed"])
     parser.add_argument("--gist_granularity", type=int, default=1, help="Granularity of gist tokens under the dispersed scheme")
+
+    ### DEPRECATED ###
     parser.add_argument("--entropy_model", type=str, default=None, help="Entropy model to help guide gist dispersion")
     parser.add_argument("--surprise_mode", type=str, default="entropy", choices=["entropy", "ce"])
     parser.add_argument("--entropy_model_temp", type=float, default=1)
+    ### END DEPRECATED ###
+
+    parser.add_argument("--act_guided_chunking", type=str, default="none", choices=["none", "normdiff"], 
+                        help="""activation-guided chunking.
+                            normdiff: chunking based on norm of difference vectors between tokens
+                        """)
+    parser.add_argument("--chunking_model", type=str, default=None, help="Chunking model used to help guide gist dispersion")
+
 
     args, unknown = parser.parse_known_args()
     return args

@@ -202,6 +202,8 @@ class GistDataCollator(DataCollatorMixin):
                  entropy_model: Optional[PreTrainedModel] = None, 
                  surprise_mode: Optional[str] = None, 
                  temp: Optional[float] = 1, 
+                 act_guided_chunking: Optional[str] = "none",
+                 chunking_model: Optional[PreTrainedModel] = None, 
                  *args, **kwargs): 
         super().__init__(*args, **kwargs)
         self.tokenizer = tokenizer
@@ -213,10 +215,16 @@ class GistDataCollator(DataCollatorMixin):
         self.entropy_model = entropy_model
         self.surprise_mode = surprise_mode
         self.temp = temp
+        self.act_guided_chunking = None if act_guided_chunking == "none" else act_guided_chunking
+        self.chunking_model = chunking_model 
+
 
         if self.gist_scheme == "dispersed": 
             assert compression_rate is not None, f"compression rate cannot be None if gist tokens are dispersed"
         self.compression_rate = compression_rate
+
+        if self.act_guided_chunking is not None: 
+            assert self.chunking_model is not None, f"act_guided_chunking requires a chunking_model"
 
     
 
@@ -234,18 +242,29 @@ class GistDataCollator(DataCollatorMixin):
         tok_outputs = self.tokenizer(contexts, return_tensors="pt", padding=True, padding_side="left")
         tok_outputs_unpadded = self.tokenizer(contexts)
 
+
         if self.entropy_model is not None: 
-            tok_outputs = tok_outputs.to(self.entropy_model.device)
+            logger.warning("Entropy model is deprecated. This will do nothing for now, and will be removed in the future.")
+            if False:
+                tok_outputs = tok_outputs.to(self.entropy_model.device)
+                inputs = {"input_ids": tok_outputs["input_ids"],
+                            "labels": tok_outputs["input_ids"], 
+                            "attention_mask":  tok_outputs["attention_mask"]}
+                surprises = compute_surprise(inputs, 
+                                            self.entropy_model, 
+                                            self.tokenizer, 
+                                            surprise_mode=self.surprise_mode, 
+                                            temp=self.temp).cpu() 
+        if self.act_guided_chunking is not None: 
+            tok_outputs = tok_outputs.to(self.chunking_model.device)
             inputs = {"input_ids": tok_outputs["input_ids"],
                         "labels": tok_outputs["input_ids"], 
                         "attention_mask":  tok_outputs["attention_mask"]}
-            surprises = compute_surprise(inputs, 
-                                        self.entropy_model, 
-                                        self.tokenizer, 
-                                        surprise_mode=self.surprise_mode, 
-                                        temp=self.temp).cpu()
+            act_signals = compute_norm_of_diffs(inputs, self.chunking_model, None, self.act_guided_chunking)
+                
+            
         
-        # uniform_gist = []
+        uniform_gist = []
         # potentially insert gist, then de-pad
         for i in range(len(batch)): 
             
@@ -253,34 +272,32 @@ class GistDataCollator(DataCollatorMixin):
             len_seq = len(tok_outputs_unpadded["input_ids"][i])
             unpadded_len = len(tok_outputs["input_ids"][i])
             unpadded_seq = tok_outputs["input_ids"][i][unpadded_len - len_seq:]
-            surprise = surprises[i][unpadded_len - len_seq:] if self.entropy_model is not None else None
+            surprise = None # surprises[i][unpadded_len - len_seq:] if self.entropy_model is not None else None
+            act_sig = act_signals[i][unpadded_len - len_seq:] if self.act_guided_chunking is not None else None 
+
 
             padded_seq_with_gist = apply_gist(unpadded_seq.tolist(), 
                 gist_scheme=self.gist_scheme, 
                 gist_token_id=self.gist_token_id, 
                 compression_rate=self.compression_rate, 
                 gist_granularity=self.gist_granularity, 
-                surprises=surprise) if self.add_gist else unpadded_seq
+                surprises=surprise, 
+                act_guided_chunking=self.act_guided_chunking, 
+                act_signal=act_sig) if self.add_gist else unpadded_seq
 
-            
-            # unif_gist = apply_gist(unpadded_seq.tolist(), 
-            #     gist_scheme=self.gist_scheme, 
-            #     gist_token_id=self.gist_token_id, 
-            #     compression_rate=self.compression_rate, 
-            #     gist_granularity=self.gist_granularity) if self.add_gist else unpadded_seq
-
-            # uniform_gist.append(self.tokenizer.decode(unif_gist))
+            unif = apply_gist(unpadded_seq.tolist(), 
+                gist_scheme=self.gist_scheme, 
+                gist_token_id=self.gist_token_id, 
+                compression_rate=self.compression_rate, 
+                gist_granularity=self.gist_granularity, 
+            ) if self.add_gist else unpadded_seq
         
             batch[i]["context"] = self.tokenizer.decode(padded_seq_with_gist)              
+            uniform_gist.append(self.tokenizer.decode(unif))
             pass
 
 
         contexts = []
-        contexts_attn_mask = []
-        questions = []
-        questions_attn_mask = []
-        answers = []
-        answers_attn_mask = []
         input_ids = []
         attention_mask = []
         label_ids = []
@@ -298,14 +315,6 @@ class GistDataCollator(DataCollatorMixin):
             que_tok = self.tokenizer(que, return_tensors="pt")["input_ids"][0]
             ans_tok = self.tokenizer(ans, return_tensors="pt")["input_ids"][0]
 
-            # contexts.append(ctx_tok)
-            # contexts_attn_mask.append(torch.ones_like(ctx_tok))
-
-            # questions.append(que_tok)
-            # questions_attn_mask.append(torch.ones_like(que_tok))
-
-            # answers.append(ans_tok)
-            # answers_attn_mask.append(torch.ones_like(ans_tok))
 
 
             inputs = torch.cat([ctx_tok, que_tok, ans_tok], dim=0)            
@@ -318,15 +327,6 @@ class GistDataCollator(DataCollatorMixin):
             label_ids.append(labels) 
             assert len(inputs) == len(labels)
         
-        #TODO: Collate them
-        # contexts = pad_sequence(contexts, batch_first=True, padding_value=self.tokenizer.pad_token_id, padding_side="left")
-        # contexts_attn_mask = pad_sequence(contexts_attn_mask, batch_first=True, padding_value=0, padding_side="left")
-
-        # questions = pad_sequence(questions, batch_first=True, padding_value=self.tokenizer.pad_token_id, padding_side="left")
-        # questions_attn_mask = pad_sequence(questions_attn_mask, batch_first=True, padding_value=0, padding_side="left")
-
-        # answers = pad_sequence(answers, batch_first=True, padding_value=self.tokenizer.pad_token_id, padding_side="left")
-        # answers_attn_mask = pad_sequence(answers_attn_mask, batch_first=True, padding_value=0, padding_side="left")
         
         input_ids = pad_sequence(input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id, padding_side="left")
         attention_mask = pad_sequence(attention_mask, batch_first=True, padding_value=0, padding_side="left")
@@ -366,12 +366,29 @@ def compute_surprise(inputs: Any,
         surprise = (-F.softmax(outputs.logits, dim=-1) * F.log_softmax(outputs.logits, dim=-1)).sum(dim=-1)
     return surprise
 
+
+def compute_norm_of_diffs(inputs: BatchEncoding, 
+                          chunking_model: PreTrainedModel, 
+                          tokenizer: PreTrainedTokenizer, 
+                          chunking_mode) -> torch.Tensor: 
+    with torch.no_grad():
+        outputs = chunking_model(**inputs, output_hidden_states=True) 
+
+    hidden_states = outputs.hidden_states[-1]
+    b, s, h = hidden_states.shape 
+    diff = hidden_states[:, 1:] - hidden_states[:, :-1]
+    norms = diff.norm(dim=-1)
+    return norms # [b, s-1]
+    
+
 def apply_gist(context: List[int], 
                gist_scheme: str, 
                gist_token_id: int, 
                compression_rate: float, 
                gist_granularity: Optional[int] = 1, 
-               surprises: Optional[torch.FloatTensor] = None) -> torch.Tensor: 
+               surprises: Optional[torch.FloatTensor] = None, # Deprecated
+               act_guided_chunking:  Optional[str] = None, 
+               act_signal: Optional[torch.FloatTensor] = None) -> torch.Tensor: 
     """
     context: [seq_len]
         post-tokenization sequence tensor
@@ -379,10 +396,20 @@ def apply_gist(context: List[int],
 
     if gist_scheme == "dispersed": 
         if surprises is not None: 
-            return apply_dispersed_gist_with_surprise_guidance(context, 
-                                                               gist_token_id, 
-                                                               compression_rate, 
-                                                               surprises)
+            if False: 
+                return apply_dispersed_gist_with_surprise_guidance(context, 
+                                                                gist_token_id, 
+                                                                compression_rate, 
+                                                                surprises)
+        if act_guided_chunking is not None: 
+            if act_guided_chunking == "normdiff": 
+                return apply_dispersed_gist_with_norm_diff_guidance(context, 
+                                                             gist_token_id, 
+                                                             compression_rate, 
+                                                             normdiffs = act_signal)
+            else: 
+                raise NotImplementedError
+        
         return apply_dispersed_gist(context, 
                                     gist_token_id, 
                                     compression_rate, 
@@ -458,6 +485,21 @@ def apply_dispersed_gist_with_surprise_guidance(
 
     return torch.tensor(context, device=surprises.device)
 
+
+
+def apply_dispersed_gist_with_norm_diff_guidance(context: List[int], 
+                                                 gist_token_id: int, 
+                                                 compression_rate: float, 
+                                                 normdiffs: torch.FloatTensor) -> List[int]: 
+    pass
+    topk = len(context) // compression_rate
+    idx = torch.argsort(-normdiffs)[:topk-1]
+    sorted_idx = torch.sort(idx, descending=True).values 
+
+    for i in sorted_idx: 
+        context.insert(i, gist_token_id)
+    context.append(gist_token_id)
+    return context
 
 
 
