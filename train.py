@@ -17,8 +17,6 @@ from transformers import (
     AutoModelForCausalLM, 
     AutoTokenizer, 
     PreTrainedTokenizer, 
-    # Seq2SeqTrainer, 
-    Seq2SeqTrainingArguments, 
     GenerationConfig
 )
 from nltk.tokenize import word_tokenize
@@ -27,7 +25,6 @@ import evaluate
 
 from trainer import Trainer, TrainingArguments
 from gist_trainer import GistTrainer
-from trainer_seq2seq import Seq2SeqTrainer
 from accelerate import Accelerator
 
 from utils import GistDataCollator

@@ -18,7 +18,7 @@ export WANDB_NAME="qwen-neg-control-cr-1"
     # --config_file="accel_config/fsdp2.yaml" \
 accelerate launch \
     --config_file="accel_config/fsdp2.yaml" \
-        distillation.py \
+        train.py \
         --output_dir="runs/qwen-neg-control" \
         --eval_steps=500 \
         --gradient_accumulation_steps=4 \

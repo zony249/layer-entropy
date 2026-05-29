@@ -19,7 +19,7 @@ nvidia-smi
 
     # --config_file="accel_config/fsdp2.yaml" \
 accelerate launch \
-        distillation.py \
+        train.py \
         --output_dir="runs/qwen-chunk-fourier-cr-5-g-4" \
         --eval_steps=500 \
         --gradient_accumulation_steps=4 \

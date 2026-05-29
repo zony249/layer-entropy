@@ -19,7 +19,7 @@ nvidia-smi
     # --config_file="accel_config/fsdp2.yaml" \
 accelerate launch \
     --num_processes=1 \
-        distillation.py \
+        train.py \
         --output_dir=$SCRATCH/runs/compress-dev \
         --eval_steps=500 \
         --gradient_accumulation_steps=4 \

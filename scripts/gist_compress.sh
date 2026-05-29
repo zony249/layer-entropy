@@ -17,7 +17,7 @@ export WANDB_NAME="qwen-gist-compress-cr-20"
 
     # --config_file="accel_config/fsdp2.yaml" \
 accelerate launch \
-        distillation.py \
+        train.py \
         --output_dir="runs/qwen-gist-compress-cr-20" \
         --eval_steps=20 \
         --gradient_accumulation_steps=4 \

@@ -17,7 +17,7 @@ export WANDB_NAME="qwen-fourier-highpass-compress-cr-5"
 
     # --config_file="accel_config/fsdp2.yaml" \
 accelerate launch \
-        distillation.py \
+        train.py \
         --output_dir="runs/qwen-fourier-highpass-compress-cr-5" \
         --eval_steps=500 \
         --gradient_accumulation_steps=4 \
