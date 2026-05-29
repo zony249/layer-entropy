@@ -192,7 +192,7 @@ if __name__ == "__main__":
     model_2, tok_2, gist_scheme = setup_model_and_env(model_name=args.model_2, args=args)
 
     chunking_model = None
-    if args.act_guided_chunking != "none": 
+    if args.act_guided_chunking is not None: 
         chunking_model = AutoModelForCausalLM.from_pretrained(args.chunking_model)
         align_special_tokens(processing_class=tok_2, model=chunking_model)
 
