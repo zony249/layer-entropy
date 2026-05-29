@@ -200,7 +200,7 @@ if __name__ == "__main__":
                 entropy_model = AutoModelForCausalLM.from_pretrained(args.entropy_model)
                 align_special_tokens(tok, entropy_model)
 
-    if args.act_guided_chunking != "none": 
+    if args.act_guided_chunking is not None: 
         assert args.chunking_model is not None, f"if act_guided_chunking is specified, then chunking_model must also be specified"
         if args.chunking_model == "self": 
             pass 
