@@ -21,11 +21,14 @@ def parse_exp_args() -> Namespace:
     parser.add_argument("--entropy_model_temp", type=float, default=1)
     ### END DEPRECATED ###
 
-    parser.add_argument("--act_guided_chunking", type=str, default="none", choices=["none", "normdiff"], 
+    parser.add_argument("--act_guided_chunking", type=str, default=None, choices=[None, "normdiff"], 
                         help="""activation-guided chunking.
                             normdiff: chunking based on norm of difference vectors between tokens
                         """)
     parser.add_argument("--chunking_model", type=str, default=None, help="Chunking model used to help guide gist dispersion")
+
+
+    parser.add_argument("--nltk_chunker", type=str, default=None, choices=[None, ""])
 
 
     args, unknown = parser.parse_known_args()
