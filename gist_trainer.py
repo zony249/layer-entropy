@@ -1,7 +1,7 @@
-import os 
+import os
 from typing import List, Dict, Union, Any, Optional, Tuple
-
-import torch 
+import wandb
+import torch
 from torch import nn
 
 from transformers.utils import (
@@ -44,28 +44,102 @@ OPTIMIZER_NAME_BIN = "optimizer.bin"
 SCHEDULER_NAME = "scheduler.pt"
 FSDP_MODEL_NAME = "pytorch_model_fsdp"
 
-from trainer import Trainer
+from transformers.trainer import (
+    Trainer,
+    nested_gather,
+
+)
 
 
 
-class GistTrainer(Trainer): 
-    def __init__(self, 
-                 generate_kwargs: Optional[dict] = None, 
-                *args, 
+class GistTrainer(Trainer):
+    def __init__(self,
+                 generate_kwargs: Optional[dict] = None,
+                *args,
                 **kwargs):
         super().__init__(*args, **kwargs)
         self.generate_kwargs = generate_kwargs if generate_kwargs is not None else {
-            "max_new_tokens": 128, 
+            "max_new_tokens": 128,
             "do_sample": True,
-            "top_p": 0.95, 
-            "top_k": 20, 
-            "temperature": 0.6, 
-            "num_beams": 1,  
+            "top_p": 0.95,
+            "top_k": 20,
+            "temperature": 0.6,
+            "num_beams": 1,
             "use_cache": True
         }
-    
-    def _maybe_log_save_evaluate(self, tr_loss, grad_norm, model, trial, epoch, ignore_keys_for_eval, start_time, learning_rate=None):
-        
+
+    def _maybe_log_save_evaluate(
+        self,
+        tr_loss: torch.Tensor,
+        grad_norm: torch.Tensor | float | None,
+        model: nn.Module,
+        trial: "optuna.Trial | dict[str, Any] | None",
+        epoch: float,
+        ignore_keys_for_eval: list[str] | None,
+        start_time: float,
+        learning_rate: float | None = None,
+    ) -> None:
+        """Log metrics, run evaluation, and save checkpoints if the current training state requires it."""
+        if self.control.should_log and self.state.global_step > self._globalstep_last_logged:
+            # if is_torch_xla_available():
+            #     xm.mark_step()
+
+            logs: dict[str, float] = {}
+
+            # all_gather + mean() to get average loss over all processes
+            tr_loss_scalar = nested_gather(tr_loss, self.args.parallel_mode).mean().item()
+
+            # reset tr_loss to zero
+            tr_loss -= tr_loss
+
+            logs["loss"] = tr_loss_scalar / (self.state.global_step - self._globalstep_last_logged)
+            if grad_norm is not None:
+                logs["grad_norm"] = grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm
+            if learning_rate is not None:
+                logs["learning_rate"] = learning_rate
+            else:
+                logs["learning_rate"] = self._get_learning_rate()
+
+            self._total_loss_scalar += tr_loss_scalar
+            self._globalstep_last_logged = self.state.global_step
+            self.store_flos()
+            logs["compression_rate"] = self.data_collator.rate.item()
+            logs["chunk_diff_norm"] = self.data_collator.get_chunk_diff()
+            logs["uniform_chunk_diff_norm"] = self.data_collator.get_uniform_chunk_diff()
+            logs["multi_token_chunk_diff_norm"] = self.data_collator.get_multi_tok_chunk_diff()
+
+            self.log(logs, start_time)
+
+        metrics = None
+        if self.control.should_evaluate:
+            metrics = self._evaluate(trial, ignore_keys_for_eval)
+            is_new_best_metric = self._determine_best_metric(metrics=metrics, trial=trial)
+
+            if self.args.save_strategy == SaveStrategy.BEST:
+                self.control.should_save = is_new_best_metric
+
+        if self.control.should_save:
+            self._save_checkpoint(model, trial)
+            self.control = self.callback_handler.on_save(self.args, self.state, self.control)
+
+            best_tfmr_path = os.path.join(self.args.output_dir, "best_tfmr")
+            if self.is_fsdp_enabled:
+                unwrapped_model = self.accelerator.unwrap_model(self.model)
+                unwrapped_model.save_pretrained(
+                        best_tfmr_path,
+                        is_main_process=self.accelerator.is_main_process,
+                        save_function=self.accelerator.save,
+                        state_dict=self.accelerator.get_state_dict(model))
+                self.processing_class.save_pretrained(best_tfmr_path)
+
+            elif self.accelerator.unwrap_model(self.model) == self.model:
+                self.model.save_pretrained(best_tfmr_path)
+                self.processing_class.save_pretrained(best_tfmr_path)
+            else:
+                raise NotImplementedError("Implement saving for distributed model")
+
+    def _maybe_log_save_evaluate_old(self, tr_loss, grad_norm, model, trial, epoch, ignore_keys_for_eval, start_time, learning_rate=None):
+
         if self.control.should_log and self.state.global_step > self._globalstep_last_logged:
             # if is_torch_xla_available():
             #     xm.mark_step()
@@ -89,7 +163,7 @@ class GistTrainer(Trainer):
             self._total_loss_scalar += tr_loss_scalar
             self._globalstep_last_logged = self.state.global_step
             self.store_flos()
-
+            logs["compression_rate"] = self.data_collator.rate.item()
             self.log(logs, start_time)
 
         metrics = None
@@ -104,12 +178,18 @@ class GistTrainer(Trainer):
             self._save_checkpoint(model, trial)
             self.control = self.callback_handler.on_save(self.args, self.state, self.control)
 
-            best_tfmr_path = os.path.join(self.args.output_dir, "best_tfmr") 
-            if self.accelerator.unwrap_model(self.model) == self.model: 
-                self.model.save_pretrained(best_tfmr_path) 
+            best_tfmr_path = os.path.join(self.args.output_dir, "best_tfmr")
+            if self.accelerator.unwrap_model(self.model) == self.model:
+                self.model.save_pretrained(best_tfmr_path)
                 self.processing_class.save_pretrained(best_tfmr_path)
-            else: 
+            else:
                 raise NotImplementedError("Implement saving for distributed model")
+
+    def log(self, logs: dict[str, float], start_time: Optional[float] = None) -> None:
+        super().log(logs, start_time)
+        # if self.state.global_step > 0:
+        #     if self.accelerator.is_main_process:
+        #         wandb.log({"compression_rate": self.data_collator.rate.item()}, step=self.state.global_step)
 
 
     def prediction_step(
@@ -222,36 +302,36 @@ class GistTrainer(Trainer):
         if len(logits) == 1:
             logits = logits[0]
 
-        return (loss, logits, labels) 
+        return (loss, logits, labels)
 
-    def generate(self, 
-                model, 
-                inputs, 
+    def generate(self,
+                model,
+                inputs,
                 generate_kwargs):
-        model.eval() 
+        model.eval()
         inputs_filtered = self.filter_out_answers(inputs, match_with="Answer:")
         for k, v in inputs_filtered.items():
             generate_kwargs[k] = v
-        outputs = model.generate(**generate_kwargs) 
-        
+        outputs = model.generate(**generate_kwargs)
+
         outputs[:, :inputs_filtered["input_ids"].shape[1]] = -100
 
         return outputs
 
-    def filter_out_answers(self, 
-                           inputs: Dict[str, torch.Tensor], 
+    def filter_out_answers(self,
+                           inputs: Dict[str, torch.Tensor],
                            match_with: Optional[str] = "Answer:"):
         text_input = self.processing_class.batch_decode(inputs["input_ids"])
         stripped_text_input = []
-        for text in text_input: 
+        for text in text_input:
             idx = text.find(match_with) + len(match_with)
-            if idx >= 0: 
+            if idx >= 0:
                 stripped_text = text[:idx]
                 stripped_text_input.append(stripped_text)
 
-        inputs = self.processing_class(stripped_text_input, 
+        inputs = self.processing_class(stripped_text_input,
                                        padding=True,
-                                       padding_side="left",  
+                                       padding_side="left",
                                        return_tensors="pt")
         inputs = inputs.to(self.accelerator.device)
         return inputs
