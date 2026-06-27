@@ -1,0 +1,11 @@
+sbatch scripts/dynamic_gist_compress/min_chunk_diff/min_chunk_diff_a-0.1_cr_5.sh
+sbatch scripts/dynamic_gist_compress/min_chunk_diff/min_chunk_diff_a-0.2_cr_5.sh
+sbatch scripts/dynamic_gist_compress/min_chunk_diff/min_chunk_diff_a-0.3_cr_5.sh
+sbatch scripts/dynamic_gist_compress/min_chunk_diff/min_chunk_diff_a-0.4_cr_5.sh
+sbatch scripts/dynamic_gist_compress/min_chunk_diff/min_chunk_diff_a-0.5_cr_5.sh
+sbatch scripts/dynamic_gist_compress/min_chunk_diff/min_chunk_diff_a-0.6_cr_5.sh
+sbatch scripts/dynamic_gist_compress/min_chunk_diff/min_chunk_diff_a-0.7_cr_5.sh
+sbatch scripts/dynamic_gist_compress/min_chunk_diff/min_chunk_diff_a-0.8_cr_5.sh
+sbatch scripts/dynamic_gist_compress/min_chunk_diff/min_chunk_diff_a-0.9_cr_5.sh
+sbatch scripts/dynamic_gist_compress/min_chunk_diff/min_chunk_diff_a-0_cr_5.sh
+sbatch scripts/dynamic_gist_compress/min_chunk_diff/min_chunk_diff_a-1_cr_5.sh

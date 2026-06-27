@@ -5,14 +5,14 @@
 #SBATCH --gpus-per-node=l40s:4
 #SBATCH --mem=128G
 #SBATCH --time=0-12:00
-#SBATCH --job-name=qwen-0.6b-pos-control
-#SBATCH --output=logs/%j--qwen-pos-control.log
+#SBATCH --job-name=uniform-cr-7.7
+#SBATCH --output=logs/%j--%x.log
 
 # export CUDA_VISIBLE_DEVICES=4,5
 export HF_HOME=$SCRATCH 
 # export DEBUG_MODE=1
 export WANDB_PROJECT="fourier-compression"
-export WANDB_NAME="qwen-pos-control"
+export WANDB_NAME="qwen-unif-compress-cr-7.7"
 # export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 nvidia-smi
@@ -21,9 +21,12 @@ nvidia-smi
 accelerate launch \
     --config_file="accel_config/fsdp2.yaml" \
         train.py \
-        --output_dir=$SCRATCH/runs/qwen-pos-control \
+        --output_dir=$SCRATCH/runs/qwen-uniform-cr-7.7 \
         --eval_steps=500 \
         --gradient_accumulation_steps=4 \
-        --lr=1e-6 \
-        --attention_mask_mode="full" \
+        --lr=1e-5 \
+        --attention_mask_mode="compression" \
         --add_gist \
+        --compression_rate=7.7 \
+        --compression_mode="none" \
+        --gist_scheme="dispersed" \

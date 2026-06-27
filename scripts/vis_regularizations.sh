@@ -15,9 +15,8 @@ accelerate launch \
     --num_processes 1 \
     --num_machines 1 \
     --mixed_precision=bf16 \
-        visualizations.py \
-        --model_1 "Qwen/Qwen3-0.6B" \
-        --model_2 /home/zonglin1/scratch/runs/qwen-uniform-cr-7.7/best_tfmr \
+        vis_regularization.py \
+        --model /home/zonglin1/scratch/runs/qwen-uniform-cr-7.7/best_tfmr \
         --add_gist \
         --compression_rate=5 \
         --attention_mask_mode=compression \
@@ -26,4 +25,3 @@ accelerate launch \
         --gist_granularity=1 \
         --act_guided_chunking=reg_cosine \
         --chunking_model=Qwen/Qwen3-0.6B \
-        --alpha_unif 1 \

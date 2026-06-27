@@ -1,5 +1,5 @@
-#!/bin/bash
-#SBATCH --account=aip-lilimou
+#!/bin/bash 
+#SBATCH --account=aip-lilimou 
 #SBATCH --cpus-per-task=1
 #SBATCH --gpus-per-node=l40s:1
 #SBATCH --mem=128G
@@ -8,7 +8,7 @@
 #SBATCH --output=logs/%j--qwen-0.6b-debug-train.log
 
 # export CUDA_VISIBLE_DEVICES=4,5
-export HF_HOME=$SCRATCH
+export HF_HOME=$SCRATCH 
 export DEBUG_MODE=1
 export WANDB_PROJECT="fourier-compression"
 export WANDB_NAME="dev"
@@ -18,7 +18,8 @@ nvidia-smi
 
     # --config_file="accel_config/fsdp2.yaml" \
 accelerate launch \
-        train.py \
+    --config_file="accel_config/fsdp2.yaml" \
+        test_fsdp.py \
         --output_dir=$SCRATCH/runs/debug \
         --eval_steps=10 \
         --gradient_accumulation_steps=4 \
@@ -27,6 +28,4 @@ accelerate launch \
         --compression_mode="none" \
         --gist_scheme="dispersed" \
         --compression_rate=5 \
-        --act_guided_chunking="min_chunk_diff" \
-        --chunking_model=Qwen/Qwen3-0.6B \
-        --use_layers 1 2 \
+        # --nltk_chunker np vp \
