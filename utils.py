@@ -33,7 +33,7 @@ from transformers.utils import logging
 logger = logging.get_logger(__name__)
 
 class DefaultArgs(Namespace):
-    gist_scheme: str = "end"
+    gist_scheme: str = "dispersed"
     add_thinking_tags: bool = True
     compression_rate: int | None = None
     add_gist: bool = True
@@ -42,6 +42,7 @@ class DefaultArgs(Namespace):
     surprise_mode: str | None = None
     entropy_model_temp: float = 1.0
     act_guided_chunking: str | None = None
+    attention_guided_chunking: str | None = None
     chunking_model: PreTrainedModel | None = None
     nltk_chunker: Any | None = None
     use_layers: List[int] | None = None
@@ -88,6 +89,7 @@ class GistDataCollator(DataCollatorMixin):
                  # chunking_model: Optional[PreTrainedModel] = None,
                  # nltk_chunker: Optional[ChunkParserI] = None,
                  collate_args: Namespace | None = None,
+                 eval_mode: bool = False,
                  *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.args = collate_args if collate_args is not None else DefaultArgs()
@@ -102,11 +104,12 @@ class GistDataCollator(DataCollatorMixin):
         self.surprise_mode = self.args.surprise_mode
         self.temp = self.args.entropy_model_temp
         self.act_guided_chunking = None if self.args.act_guided_chunking == "none" else self.args.act_guided_chunking
+        self.attention_guided_chunking = self.args.attention_guided_chunking
         self.chunking_model = self.args.chunking_model
         self.nltk_chunker = self.args.nltk_chunker
         self.layer_selection = [1] if self.args.use_layers is None else self.args.use_layers
         self.alpha_unif = self.args.alpha_unif
-
+        self.eval_mode = eval_mode
 
         # logging
         self.seq_count = 0
@@ -135,11 +138,25 @@ class GistDataCollator(DataCollatorMixin):
         if self.tokenizer.bos_token is None:
             self.tokenizer.bos_token = self.tokenizer.pad_token
 
-        contexts = [example["context"] for example in batch]
-        tok_outputs = self.tokenizer(contexts, return_tensors="pt", padding=True, padding_side="left")
-        tok_outputs_unpadded = self.tokenizer(contexts)
+        if self.attention_guided_chunking: 
+            pass
+            inputs = [example["context"] + "\n\nQuestion: " + example["question"] for example in batch]
+            contexts = [example["context"] for example in batch]
+            questions = ["\n\nQuestion: " + example["question"] for example in batch]
+            tok_outputs = self.tokenizer(inputs, return_tensors="pt", padding=True, padding_side="left")
+            contexts_unpadded: List = self.tokenizer(contexts)
+            questions_unpadded: List = self.tokenizer(questions)
+            tok_outputs_unpadded = contexts_unpadded
+        else:
+            contexts = [example["context"] for example in batch]
+            tok_outputs = self.tokenizer(contexts, return_tensors="pt", padding=True, padding_side="left")
+            tok_outputs_unpadded = self.tokenizer(contexts)
+        
 
-        # post-tokenization-based gist assignment:
+        ####################################################
+        ##### post-tokenization-based gist assignment: #####
+        ####################################################
+
         if self.entropy_model is not None:
             logger.warning("Entropy model is deprecated. This will do nothing for now, and will be removed in the future.")
             if False:
@@ -189,7 +206,21 @@ class GistDataCollator(DataCollatorMixin):
                     act_signals = torch.stack([outputs.hidden_states[i] for i in self.layer_selection], dim=0).mean(dim=0)
                     del outputs
                     # act_signals = torch.stack(outputs.hidden_states, dim=0).mean(dim=0)
+        batch_attn_states = None 
+        if self.attention_guided_chunking is not None: 
+            if self.attention_guided_chunking == "q-wise": 
+                assert self.chunking_model is not None, "Attention guided chunking requires a chunking model" 
+                batch_attn_states = compute_attention_states(
+                    model=self.chunking_model, 
+                    inputs=tok_outputs, 
+                    unpadded_contexts=contexts_unpadded, 
+                    unpadded_questions=questions_unpadded
+                )
+                pass
 
+        ################################
+        ##### NLTK GIST ASSIGNMENT #####
+        ################################
 
         if self.nltk_chunker is not None:
             contexts = [add_gist_str_using_linguistic_chunker(
@@ -208,10 +239,11 @@ class GistDataCollator(DataCollatorMixin):
             else:
                 #shorten surprise sequence, as we don't care about padding
                 len_seq = len(tok_outputs_unpadded["input_ids"][i])
-                unpadded_len = len(tok_outputs["input_ids"][i])
-                unpadded_seq: List[int] = tok_outputs["input_ids"][i][unpadded_len - len_seq:].tolist()
+                padded_len = len(tok_outputs["input_ids"][i])
+                unpadded_seq: List[int] =  contexts_unpadded["input_ids"][i] #tok_outputs["input_ids"][i][padded_len - len_seq:].tolist()
                 surprise = None # surprises[i][unpadded_len - len_seq:] if self.entropy_model is not None else None
-                act_sig: torch.Tensor | None = act_signals[i][unpadded_len - len_seq:] if act_signals is not None else None
+                act_sig: torch.Tensor | None = act_signals[i][padded_len - len_seq:] if act_signals is not None else None
+                attn_sig: torch.Tensor | None = batch_attn_states[i] if batch_attn_states is not None else None
 
 
                 padded_seq_with_gist = apply_gist(deepcopy(unpadded_seq),
@@ -222,6 +254,8 @@ class GistDataCollator(DataCollatorMixin):
                     surprises=surprise,
                     act_guided_chunking=self.act_guided_chunking,
                     act_signal=act_sig,
+                    attention_guided_chunking=self.attention_guided_chunking, 
+                    attn_signal=attn_sig,
                     alpha_unif=self.alpha_unif) if self.add_gist else deepcopy(unpadded_seq)
 
                 unif = apply_gist(deepcopy(unpadded_seq),
@@ -249,29 +283,39 @@ class GistDataCollator(DataCollatorMixin):
         label_ids = []
 
 
+        references = []
 
         for example in batch:
             ctx = self.tokenizer.bos_token + "Context: " + example["context"]
             que = "\n\nQuestion: " + example["question"]
             que += "\n\n<think>\n\n</think>" if self.add_thinking_tags else ""
             que += "\n\nAnswer: "
-            ans = example["answers"] + self.tokenizer.eos_token
+            if self.eval_mode: 
+                ans = example["answers"]["text"][0]  + self.tokenizer.eos_token if len(example["answers"]["text"]) > 0  else ""
+            else: 
+                ans = example["answers"] + self.tokenizer.eos_token
+            
 
             ctx_tok = self.tokenizer(ctx, return_tensors="pt")["input_ids"][0]
             que_tok = self.tokenizer(que, return_tensors="pt")["input_ids"][0]
             ans_tok = self.tokenizer(ans, return_tensors="pt")["input_ids"][0]
 
+            if self.eval_mode: 
+                references.append({"answers": example["answers"], "id": example["id"]})
+                inputs = torch.cat([ctx_tok, que_tok], dim=0)
+                labels = ans_tok
+                label_ids.append(labels)
+            else:
+                inputs = torch.cat([ctx_tok, que_tok, ans_tok], dim=0)
+                labels = torch.cat([torch.ones_like(ctx_tok) * -100,
+                                    torch.ones_like(que_tok) * -100,
+                                    ans_tok], dim=0)
+                label_ids.append(labels)
+                assert len(inputs) == len(labels)
 
-
-            inputs = torch.cat([ctx_tok, que_tok, ans_tok], dim=0)
             input_ids.append(inputs)
             attention_mask.append(torch.ones_like(inputs))
 
-            labels = torch.cat([torch.ones_like(ctx_tok) * -100,
-                                torch.ones_like(que_tok) * -100,
-                                ans_tok], dim=0)
-            label_ids.append(labels)
-            assert len(inputs) == len(labels)
 
             # log compression_rate
             self.log_compression_rate(ctx_tok, gist_token_id=self.gist_token_id)
@@ -283,6 +327,14 @@ class GistDataCollator(DataCollatorMixin):
         label_ids = pad_sequence(label_ids, batch_first=True, padding_value=-100, padding_side="left")
 
         gist_positions = find_tok_pos(input_ids, self.gist_token_id)
+
+        if self.eval_mode: 
+            return BatchEncoding({
+                "input_ids": input_ids,
+                "labels": label_ids,
+                "attention_mask": attention_mask,
+                # "gist_positions": gist_positions
+            }), references
 
         return BatchEncoding({
             "input_ids": input_ids,
@@ -367,6 +419,26 @@ def compute_norm_of_diffs(inputs: BatchEncoding,
     norms = diff.norm(dim=-1)
     return norms # [b, s-1]
 
+def compute_attention_states(
+    model: PreTrainedModel, 
+    inputs: BatchEncoding,  
+    unpadded_contexts: List[List[int]], 
+    unpadded_questions: List[List[int]], 
+) -> List[torch.Tensor]: 
+    assert model.config._attn_implementation == "eager", "Attention implementation must be set to eager to output attentions"
+    inputs = inputs.to(model.device) 
+    with torch.no_grad():
+        attn_states = torch.stack(model(**inputs, output_attentions=True).attentions, dim=0).mean(dim=(0, 2))
+    ctx_lens = [len(x) for x in unpadded_contexts["input_ids"]]
+    question_lens = [len(x) for x in unpadded_questions["input_ids"]]
+    input_lens = [x + y for x, y in zip(ctx_lens, question_lens)]
+    question_to_context_attn_states = [] 
+    for i in range(len(attn_states)): 
+        context_start = attn_states[i].shape[1] - input_lens[i]
+        question_start = context_start + ctx_lens[i]
+        question_to_context_attn_states.append(attn_states[i][question_start:, context_start:question_start])
+    return question_to_context_attn_states
+
 
 def apply_gist(context: List[int],
                gist_scheme: str,
@@ -375,7 +447,9 @@ def apply_gist(context: List[int],
                gist_granularity: Optional[int] = 1,           # Deprecated
                surprises: Optional[torch.FloatTensor] = None, # Deprecated
                act_guided_chunking:  Optional[str] = None,
+               attention_guided_chunking: str | None = None, 
                act_signal: Optional[torch.Tensor] = None,
+               attn_signal: torch.Tensor = None, 
                nltk_chunker: Optional[ChunkParserI] = None,
                alpha_unif: float | None = None) -> torch.Tensor | List[int]:
     """
@@ -419,7 +493,16 @@ def apply_gist(context: List[int],
                     alpha=alpha
                 )
             else:
-                raise NotImplementedError
+                raise NotImplementedError 
+        if attention_guided_chunking is not None: 
+            if attention_guided_chunking == "q-wise": 
+                assert attn_signal is not None, "q-wise attention_guided_chunking requires attention signal"
+                return apply_gist_with_q_wise_attention_guidance(
+                    contexts=context, 
+                    attention_signal=attn_signal, 
+                    compression_rate=compression_rate, 
+                    gist_token_id=gist_token_id
+                )
 
         if nltk_chunker is not None:
             pass
@@ -525,7 +608,6 @@ def apply_gist_with_reg_cosine_chunking(
     splits = int(np.ceil(len(context) / compression_rate))
     chunk_map = compute_reg_cosine_chunking(hidden_states, splits=splits, alpha=alpha)
     chunk_heads = sorted(chunk_map.keys())[::-1]
-    print(chunk_map)
     for head in chunk_heads:
         # print(chunk_map[head])
         gist_idx = chunk_map[head][-1]
@@ -597,6 +679,29 @@ def add_gist_str_using_linguistic_chunker(context: str,
     compact_gist = re.sub(f'\s{gist_token}\s?', gist_token, pre_out)
     output = re.sub(f'\s\.', '.', compact_gist)
     return output
+
+
+def apply_gist_with_q_wise_attention_guidance(
+    contexts: List[int], 
+    attention_signal: torch.Tensor, 
+    compression_rate: float, 
+    gist_token_id: int, 
+    ignore_first: bool = True
+):  
+    splits: int = int(np.ceil(len(contexts) / compression_rate))
+    sum_of_output_weights = attention_signal.sum(dim=0)
+    idx = torch.argsort(sum_of_output_weights, descending=True)
+    if ignore_first: 
+        idx = idx[idx != 0]
+    top_k = sorted(idx[:splits].tolist(), reverse=True) 
+    for x in top_k: 
+        contexts.insert(x+1, gist_token_id)
+    # contexts.append(gist_token_id)
+    return contexts 
+
+
+
+
 
 
 
@@ -865,16 +970,26 @@ if __name__ == "__main__":
 
 
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
-    ent_model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-0.6B").cuda()
+    ent_model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-0.6B", attn_implementation="eager").cuda()
     special_tokens = {"additional_special_tokens": ["<GIST>"]}
     tokenizer.add_special_tokens(special_tokens)
 
+
+    import debugpy
+    debugpy.listen(("0.0.0.0", 5678))
+    print("Waiting for debugger attach...")
+    debugpy.wait_for_client()
+
+
+
     args = DefaultArgs()
     args.add_gist = True
-    args.act_guided_chunking = "min_chunk_diff"
+    # args.act_guided_chunking = "min_chunk_diff"
+    args.attention_guided_chunking = "q-wise"
     args.chunking_model = ent_model
     args.use_layers = [1]
     args.compression_rate = 3
+    args.gist_scheme = "dispersed"
 
 
     collator = GistDataCollator(
@@ -902,10 +1017,6 @@ if __name__ == "__main__":
 
 
 
-    import debugpy
-    debugpy.listen(("0.0.0.0", 5678))
-    print("Waiting for debugger attach...")
-    debugpy.wait_for_client()
     #
     context_seq = test_sample[1]["context"]
     toked = tokenizer([context_seq], return_tensors="pt").to("cuda")

@@ -25,6 +25,7 @@ def parse_exp_args() -> Namespace:
                         help="""activation-guided chunking.
                             normdiff: chunking based on norm of difference vectors between tokens
                         """)
+    parser.add_argument("--attention_guided_chunking", type=str, default=None, choices=[None, "q-wise"])
     parser.add_argument("--chunking_model", type=str, default=None, help="Chunking model used to help guide gist dispersion")
     parser.add_argument("--use_layers", type=int, nargs="+", default=None)
 

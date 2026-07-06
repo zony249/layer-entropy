@@ -330,7 +330,7 @@ class Qwen3DecoderLayer(GradientCheckpointingLayer):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         # Self Attention
-        hidden_states, _ = self.self_attn(
+        hidden_states, attn_weights = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -346,6 +346,9 @@ class Qwen3DecoderLayer(GradientCheckpointingLayer):
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
+
+        if kwargs["output_attentions"]: 
+            return hidden_states, attn_weights
         return hidden_states
 
 
@@ -578,6 +581,10 @@ class CompQwen3Model(Qwen3PreTrainedModel):
         use_cache: bool | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPast:
+        
+        if "output_attentions" not in kwargs: 
+            kwargs["output_attentions"] = False
+
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
@@ -656,6 +663,8 @@ class CompQwen3Model(Qwen3PreTrainedModel):
         # create position embeddings to be shared across the decoder layers
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
+        attentions = [] if kwargs["output_attentions"] else None
+
         for i, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
 
             if is_prefill: 
@@ -671,11 +680,16 @@ class CompQwen3Model(Qwen3PreTrainedModel):
                 position_embeddings=position_embeddings,
                 **kwargs,
             )
+            if kwargs["output_attentions"]: 
+                attn_weights = hidden_states[-1]
+                hidden_states = hidden_states[0] 
+                attentions.append(attn_weights) 
 
         hidden_states = self.norm(hidden_states)
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=past_key_values if use_cache else None,
+            attentions=attentions if kwargs["output_attentions"] else None 
         )
 
 

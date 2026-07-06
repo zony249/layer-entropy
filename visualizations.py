@@ -39,6 +39,7 @@ from utils import (
 )
 from exp_args import parse_exp_args, join_args
 from eval_squad import collate_fn
+from utils import GistDataCollator
 from models.compression_utils import find_context_start
 
 
@@ -103,11 +104,11 @@ if __name__ == "__main__":
     # try:
     #     debug_mode = int(os.environ["DEBUG_MODE"])
     #     if debug_mode > 0:
-    #         print("starting debugger")
-    #         import debugpy
-    #         debugpy.listen(("172.26.93.9", 5678))
-    #         print("Waiting for debugger attach...")
-    #         debugpy.wait_for_client()
+    print("starting debugger")
+    import debugpy
+    debugpy.listen(("0.0.0.0", 5678))
+    print("Waiting for debugger attach...")
+    debugpy.wait_for_client()
     # except:
     #     pass
 
@@ -126,8 +127,9 @@ if __name__ == "__main__":
     model_2, tok_2, gist_scheme = setup_model_and_env(model_name=args.model_2, args=args)
 
     chunking_model = None
-    if args.act_guided_chunking is not None:
-        chunking_model = AutoModelForCausalLM.from_pretrained(args.chunking_model)
+    if args.act_guided_chunking is not None or args.attention_guided_chunking:
+        chunking_model = AutoModelForCausalLM.from_pretrained(args.chunking_model, 
+                                                              attn_implementation = "eager" if args.attention_guided_chunking is not None else "sdpa")
         align_special_tokens(processing_class=tok_2, model=chunking_model)
 
 
@@ -150,11 +152,12 @@ if __name__ == "__main__":
     dloader = DataLoader(valset,
                          batch_size=12,
                          shuffle=False,
-                         collate_fn=partial(collate_fn,
-                                            tokenizer=tok_1,
+                         collate_fn=GistDataCollator(tok_1,
+                                            gist_token_id=tok_1.convert_tokens_to_ids("<GIST>"), 
                                             add_thinking_tags=True,
-                                            collator_args=collator_args
-                                            ))
+                                            collate_args=collator_args, 
+                                            eval_mode=True
+                                        ))
 
     accelerator = Accelerator()
     model_1, tok_1, dloader = accelerator.prepare(model_1, tok_1, dloader)
@@ -228,7 +231,8 @@ if __name__ == "__main__":
 
             # x = np.arange(len(tokens_1))
             tok_output_to_show_gist = tok_outputs_to_show_chunking[b]
-            tok_output_to_show_gist = tok_output_to_show_gist.split("\n\nQues", 1)[0]
+            # tok_output_to_show_gist = tok_output_to_show_gist.split("\n\nQues", 1)[0]
+            tok_output_to_show_gist = tok_output_to_show_gist.replace("\n", "")
             tok_output_to_show_gist = tok_output_to_show_gist.split(tok_2.pad_token)[-1]
             tok_outputs.write(tok_output_to_show_gist + "\n")
 

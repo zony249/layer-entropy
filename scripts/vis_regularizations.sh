@@ -16,12 +16,12 @@ accelerate launch \
     --num_machines 1 \
     --mixed_precision=bf16 \
         vis_regularization.py \
-        --model /home/zonglin1/scratch/runs/qwen-uniform-cr-7.7/best_tfmr \
+        --model Qwen/Qwen3-0.6B \
         --add_gist \
         --compression_rate=5 \
         --attention_mask_mode=compression \
         --compression_mode=average \
         --gist_scheme=dispersed \
         --gist_granularity=1 \
-        --act_guided_chunking=reg_cosine \
+        --attention_guided_chunking=q-wise \
         --chunking_model=Qwen/Qwen3-0.6B \
