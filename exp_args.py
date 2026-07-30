@@ -37,6 +37,20 @@ def parse_exp_args() -> Namespace:
     args, unknown = parser.parse_known_args()
     return args
 
+def parse_chunk_exp_args(other_args: List | None = None) -> Namespace:  
+    parser = ArgumentParser() 
+    parser.add_argument("--chunking_model", type=str, default=None)
+    parser.add_argument("--model", type=str, default=None) 
+
+    parser.add_argument("--compression_rate", type=float, default=1)
+    parser.add_argument("--mask_mode", type=str, default="soft", choices=["hard", "soft", "full", "contextless"])
+
+    if other_args is None: 
+        other_args = []
+    args, unknown = parser.parse_known_args(sys.argv + other_args) 
+    return args, unknown
+
+
 def join_args(*list_args) -> Namespace:
     joint_dict = {k: v for a in list_args for k, v in vars(a).items()}
     return Namespace(**joint_dict)
