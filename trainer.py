@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Any
 
 # Integrations must be imported before ML frameworks:
 # ruff: isort: off
-from .integrations import (
+from transformers.integrations import (
     get_reporting_integration_callbacks,
 )
 
@@ -146,7 +146,7 @@ from transformers.trainer_utils import (
     validate_quantization_for_training,
 )
 from transformers.training_args import OptimizerNames, ParallelMode, TrainingArguments
-from .utils import (
+from transformers.utils import (
     ADAPTER_CONFIG_NAME,
     ADAPTER_SAFE_WEIGHTS_NAME,
     ADAPTER_WEIGHTS_NAME,
@@ -347,7 +347,7 @@ class Trainer:
     """
 
     # Those methods are not used in Trainer itself but are available as methods for external use.
-    from .trainer_pt_utils import (
+    from transformers.trainer_pt_utils import (
         get_learning_rates,
         get_num_trainable_parameters,
         get_optimizer_group,

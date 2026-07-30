@@ -386,6 +386,132 @@ class GistDataCollator(DataCollatorMixin):
     def get_multi_tok_chunk_diff(self):
         return np.mean(self.multi_token_chunk_diff_norm)
 
+
+@dataclass
+class ChunkCollator(DataCollatorMixin): 
+
+    def __init__(self, 
+                 tokenizer: PreTrainedTokenizer, 
+                 validation_mode: bool = False, 
+                 collator_args: Namespace | None = None, 
+                 *args, 
+                 **kwargs): 
+        super().__init__() 
+        self.args = collator_args if collator_args is not None else DefaultArgs()
+
+        self.tokenizer = tokenizer
+        self.tokenizer.bos_token = self.tokenizer.eos_token 
+        self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer.padding_side = "left"
+        self.validation_mode = validation_mode
+
+        self.compression_rate = self.args.compression_rate
+    
+    def __call__(self, examples: Any) -> BatchEncoding: 
+        """
+        examples: [{"context": str, 
+                    "question": str, 
+                    "answer": str}, ...]
+        """
+        input_ids_list: List = []
+        labels_list: List = []
+        attention_mask_list: List = []
+        token_type_ids_list: List = []
+        references = [] if self.validation_mode else None
+
+        for sample in examples: 
+            if not self.validation_mode:
+                _input_ids, _labels, _token_type_ids = self.process_train_sample(sample) 
+            else:      
+                _input_ids, _labels, _token_type_ids = self.process_val_sample(sample)
+                references.append({"answers": sample["answers"], "id": sample["id"]})
+
+            input_ids_list.append(torch.tensor(_input_ids))
+            labels_list.append(torch.tensor(_labels))
+            attention_mask_list.append(torch.tensor([1 for _ in range(len(_input_ids))]))
+            token_type_ids_list.append(torch.tensor(_token_type_ids))
+            
+
+        
+        input_ids = pad_sequence(input_ids_list, batch_first=True, padding_value=self.tokenizer.pad_token_id, padding_side="left")
+        labels = pad_sequence(labels_list, batch_first=True, padding_value=-100, padding_side="left")
+        attention_mask = pad_sequence(attention_mask_list, batch_first=True, padding_value=0, padding_side="left").long()
+        token_type_ids = pad_sequence(token_type_ids_list, batch_first=True, padding_value=0, padding_side="left").long() 
+        batch_enc = BatchEncoding({
+            "input_ids": input_ids, 
+            "labels": labels, 
+            "attention_mask": attention_mask, 
+            "token_type_ids": token_type_ids
+        })
+        if self.validation_mode: 
+            return batch_enc, references 
+        return batch_enc
+
+    def process_train_sample(self, sample: Dict[str, str]) -> Tuple[List, List, List]: 
+        ctx = "Context: " + sample["context"]
+        que = "\n\nQuestion: " + sample["question"] + "\n\n<think>\n\n</think>" + "\n\nAnswer: "
+        ans = sample["answers"] + self.tokenizer.eos_token
+        
+        ctx_ids = self.tokenizer.encode(self.tokenizer.bos_token + ctx)
+        que_ids = self.tokenizer.encode(que)
+        ans_ids = self.tokenizer.encode(ans)
+        input_ids = ctx_ids + que_ids + ans_ids
+
+        que_start = len(ctx_ids)
+        interval = int(np.round(self.compression_rate))
+        token_type_ids_rev = []
+        i = 0
+        while i < que_start: 
+            if i % interval == 0: 
+                token_type_ids_rev.append(1) 
+            else: 
+                token_type_ids_rev.append(0) 
+            i+=1 
+        
+        labels = torch.cat([torch.ones(len(ctx_ids)) * -100, 
+                            torch.ones(len(que_ids)) * -100, 
+                            torch.tensor(ans_ids)]).long().tolist()
+        
+        token_type_ids_rev = [1 for _ in range(len(que_ids) + len(ans_ids))] + token_type_ids_rev 
+        token_type_ids = token_type_ids_rev[::-1]
+
+        return input_ids, labels, token_type_ids
+    
+
+    def process_val_sample(self, sample: Any) -> Tuple[List, List, List]: 
+        pass
+        ctx = "Context: " + sample["context"]
+        que = "\n\nQuestion: " + sample["question"] + "\n\n<think>\n\n</think>" + "\n\nAnswer: "
+        ans = sample["answers"]["text"][0]  + self.tokenizer.eos_token if len(sample["answers"]["text"]) > 0  else ""
+        
+        ctx_ids = self.tokenizer.encode(self.tokenizer.bos_token + ctx)
+        que_ids = self.tokenizer.encode(que)
+        ans_ids = self.tokenizer.encode(ans)
+
+        input_ids = ctx_ids + que_ids 
+        labels = ans_ids 
+
+        que_start = len(ctx_ids)
+        interval = int(np.round(self.compression_rate))
+        token_type_ids_rev = []
+        i = 0
+        while i < que_start: 
+            if i % interval == 0: 
+                token_type_ids_rev.append(1) 
+            else: 
+                token_type_ids_rev.append(0) 
+            i+=1 
+
+        token_type_ids_rev = [1 for _ in range(len(que_ids))] + token_type_ids_rev 
+        token_type_ids = token_type_ids_rev[::-1]
+        return input_ids, labels, token_type_ids
+
+
+
+
+
+
+
 def compute_surprise(inputs: Any,
                      entropy_model: PreTrainedModel,
                      tokenizer: PreTrainedTokenizer,
@@ -970,15 +1096,15 @@ if __name__ == "__main__":
 
 
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
-    ent_model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-0.6B", attn_implementation="eager").cuda()
-    special_tokens = {"additional_special_tokens": ["<GIST>"]}
-    tokenizer.add_special_tokens(special_tokens)
+    # ent_model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-0.6B", attn_implementation="eager").cuda()
+    # special_tokens = {"additional_special_tokens": ["<GIST>"]}
+    # tokenizer.add_special_tokens(special_tokens)
 
 
-    import debugpy
-    debugpy.listen(("0.0.0.0", 5678))
-    print("Waiting for debugger attach...")
-    debugpy.wait_for_client()
+    # import debugpy
+    # debugpy.listen(("0.0.0.0", 5678))
+    # print("Waiting for debugger attach...")
+    # debugpy.wait_for_client()
 
 
 
@@ -986,18 +1112,18 @@ if __name__ == "__main__":
     args.add_gist = True
     # args.act_guided_chunking = "min_chunk_diff"
     args.attention_guided_chunking = "q-wise"
-    args.chunking_model = ent_model
+    # args.chunking_model = ent_model
     args.use_layers = [1]
     args.compression_rate = 3
     args.gist_scheme = "dispersed"
 
 
-    collator = GistDataCollator(
-        tokenizer,
-        gist_token_id = tokenizer.convert_tokens_to_ids("<GIST>"),
-        add_thinking_tags = True,
-        collate_args = args
-    )
+    # collator = GistDataCollator(
+    #     tokenizer,
+    #     gist_token_id = tokenizer.convert_tokens_to_ids("<GIST>"),
+    #     add_thinking_tags = True,
+    #     collate_args = args
+    # )
 
     test_sample = [
         {"context": "something wrong with this tokenizer, maybe it's the vocab size",
@@ -1008,22 +1134,22 @@ if __name__ == "__main__":
         "answers": "fixed the tokenizer"},
     ]
 
-    output = collator(test_sample)
-    pass
+    # output = collator(test_sample)
+    # pass
 
 
-    hidden_states = torch.randn((10, 3))
-    splits = 8
+    # hidden_states = torch.randn((10, 3))
+    # splits = 8
 
 
 
-    #
-    context_seq = test_sample[1]["context"]
-    toked = tokenizer([context_seq], return_tensors="pt").to("cuda")
-    hids = ent_model(**toked, output_hidden_states=True).hidden_states[10]
-    hid = hids[0]
+    # #
+    # context_seq = test_sample[1]["context"]
+    # toked = tokenizer([context_seq], return_tensors="pt").to("cuda")
+    # hids = ent_model(**toked, output_hidden_states=True).hidden_states[10]
+    # hid = hids[0]
 
-    compute_reg_cosine_chunking(hid, splits=8, alpha=0.5)
+    # compute_reg_cosine_chunking(hid, splits=8, alpha=0.5)
 
     # x = torch.tensor([[1, 2, 3, 4, 5, 1, 2, 3, 4], [5, 4, 3, 2, 4, 4, 5, 6, 4]])
     # poses = find_tok_pos(x, 3)
@@ -1046,3 +1172,6 @@ if __name__ == "__main__":
     #                                     gist_idx=gist_idx)
 
     # pass
+
+    collator = ChunkCollator(tokenizer=tokenizer, collator_args=args)
+    collator(test_sample)
