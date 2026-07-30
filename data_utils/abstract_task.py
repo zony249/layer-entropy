@@ -26,7 +26,7 @@ class AbstractTask(ABC):
         self.datasets = self.get_datasets(list_splits=list_splits) 
         # pre-process dataset
         for k, dataset in self.datasets.items(): 
-            self.datasets[k] = self.preprocess_dataset(dataset)            
+            self.datasets[k] = self.preprocess_dataset(k, dataset)            
         
         self.dataloaders = self.get_dataloaders(list_splits=list_splits) 
 
@@ -43,7 +43,7 @@ class AbstractTask(ABC):
     def preprocess_sample(self, input_sample: Any): 
         raise NotImplementedError()
 
-    def preprocess_dataset(self, dataset: Dataset) -> Dataset: 
+    def preprocess_dataset(self, split: str, dataset: Dataset) -> Dataset: 
         raise NotImplementedError() 
 
     # def collate_fn(self, batch) -> Any: 
