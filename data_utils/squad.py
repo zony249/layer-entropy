@@ -12,8 +12,16 @@ from datasets import load_dataset, load_from_disk
 from .abstract_task import AbstractTask 
 
 class Squad(AbstractTask): 
-    def __init__(self, *args, **kwargs): 
-        super().__init__(*args, **kwargs) 
+    def __init__(
+        self,
+        list_splits: List[str], 
+        batch_size: Optional[int] = 8, 
+        local_dir: Optional[str] = None, 
+        load_local: Optional[bool] = False, 
+        preprocess_validation: bool = False,
+    ): 
+        self.preprocess_validation = preprocess_validation
+        super().__init__(list_splits, batch_size, local_dir, load_local) 
         self.local_dir = "squad-local" if self.local_dir is None else self.local_dir
 
     def get_datasets(self, list_splits: List[str]) -> Dict[str, Dataset]:
@@ -67,13 +75,14 @@ class Squad(AbstractTask):
         return {"context": example["context"], 
                 "question": example["question"], 
                 "answers": example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else "Not enough information."}    
-    
 
     # def remove_no_answer(self, example: Any): 
     #     return len(example["answers"]) > 0
 
-    def preprocess_dataset(self, dataset: Dataset) -> Dataset: 
-        dataset = dataset.map(self.preprocess_sample, remove_columns=["context", "question", "answers"])#.filter(self.remove_no_answer)
+    def preprocess_dataset(self, split:str, dataset: Dataset) -> Dataset: 
+        
+        if split == "train" or self.preprocess_validation: 
+            dataset = dataset.map(self.preprocess_sample, remove_columns=["context", "question", "answers"])#.filter(self.remove_no_answer)
         return dataset
 
     # def collate_fn(self, batch: List[Tuple[str, str]]) -> Tuple[List[str], List[str]]:
