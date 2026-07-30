@@ -8,6 +8,61 @@ from torch import nn
 from torch.nn import functional as F 
 
 
+
+
+
+def compute_soft_chunk_mask(
+    P_batched: torch.Tensor,
+    new_tokens:int,
+    total_seq_len: int
+) -> torch.Tensor: 
+    """
+    P_batched: [batch, seq_len, 3]
+    """
+    M_batched = torch.zeros((P_batched.shape[0], new_tokens, total_seq_len), device=P_batched.device)
+    for b, P in enumerate(P_batched): 
+        log_P = torch.log(P * (1-1e-8) + 5e-9) 
+        clog_P_j = torch.cumsum(log_P[:, 0], dim=0) - log_P[:, 0] + (torch.log(P[:, 0] + P[:, 1]))
+        clog_P_i = torch.cumsum(log_P[:, 0], dim=0) - log_P[:, 0]
+        clog_P_ji = clog_P_j[:, None] - clog_P_i[None, :] 
+        P_same = torch.tril(torch.exp(clog_P_ji))
+        M = torch.zeros((total_seq_len, total_seq_len))
+        Pji_bound_downstream = torch.tril(P[:, 2][:, None] * P[:, 1][None, :])
+        Pji_downstream = torch.tril(P[:, 2][:, None] * P[:, 2][None, :])
+        Pji_bounds = torch.tril(P[:, 1][:, None] * P[:, 1][None, :])
+        M = P_same + (1-P_same) * (Pji_bound_downstream + Pji_downstream + Pji_bounds)
+        M_batched[b] = M[-new_tokens:]
+    return M_batched[:, None, :, :]
+
+def compute_soft_chunk_mask(
+    P_batched: torch.Tensor,
+    new_tokens:int,
+    total_seq_len: int
+) -> torch.Tensor:
+
+    """
+    P_batched: [batch, seq_len, 1]
+    """
+    M_batched = torch.zeros((P_batched.shape[0], new_tokens, total_seq_len), device=P_batched.device)
+
+    for b, P in enumerate(P_batched): 
+        log_P = torch.log((1-P).clamp(min=1e-8))[:, 0]
+        clog_P = torch.cumsum(log_P, dim=0)
+        clog_P_ij = clog_P[: , None] - clog_P[None, :]  + log_P[None, :] - log_P[:, None] 
+        causal_mask = torch.tril(torch.ones(clog_P_ij.shape, dtype=bool, device=P_batched.device))
+        log_P_same = torch.where(causal_mask, clog_P_ij, torch.finfo(P.dtype).min * 1e-2) 
+        P_same = torch.exp(log_P_same) 
+        P_end = torch.tril(P[:, None, 0] * P[None, :, 0])
+        M = P_same  + (1-P_same) * P_end
+
+        M_batched[b] = M[-new_tokens:]
+    return M_batched[:, None, :, :]
+
+
+
+
+
+
 def find_idx(input_ids: torch.LongTensor, 
              token_id: int) -> List[torch.LongTensor]: 
     assert token_id is not None, "token_id cannot be None"
