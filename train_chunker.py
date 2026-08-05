@@ -51,6 +51,7 @@ if __name__ == "__main__":
     parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
     parser.add_argument("--eval_steps", type=int, default=500)
     parser.add_argument("--num_layers", type=int, default=5)
+    parser.add_argument("--l2", type=float, default=0)
 
     training_specific_args, unknown = parser.parse_known_args() 
     general_args, unknown = parse_chunk_exp_args(unknown)
@@ -106,7 +107,7 @@ if __name__ == "__main__":
         train_dataset=trainset,
         eval_dataset=valset, 
         processing_class=tokenizer, 
-        optimizer_cls_and_kwargs=(AdamW, {"params": chunking_model.parameters(), "lr": args.lr, "weight_decay":1e-2})
+        optimizer_cls_and_kwargs=(AdamW, {"params": chunking_model.parameters(), "lr": args.lr, "weight_decay": args.l2})
     )
 
     trainer.train()
