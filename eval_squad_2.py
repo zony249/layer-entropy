@@ -292,10 +292,10 @@ if __name__ == "__main__":
         token_type_ids = batch.pop("token_type_ids")
 
         if args.mask_mode == "hard": 
-            chunk_signal = F.one_hot(token_type_ids, num_classes=3)
+            chunk_signal = token_type_ids[:, :, None].float()
         elif args.mask_mode == "soft": 
             chunker_inputs = deepcopy(batch) 
-            chunker_inputs["labels"] = token_type_ids
+            # chunker_inputs["labels"] = token_type_ids
             with torch.no_grad():
                 logits = chunking_model(**chunker_inputs)["logits"]
             chunk_signal = F.sigmoid(logits)
