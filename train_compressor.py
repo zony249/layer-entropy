@@ -108,7 +108,7 @@ if __name__ == "__main__":
         save_steps=args.eval_steps, 
         remove_unused_columns=False, 
         metric_for_best_model="loss",
-        # eval_on_start=True, 
+        eval_on_start=True, 
         
         mask_mode=args.mask_mode, 
         alpha_unif=args.alpha_unif, 
