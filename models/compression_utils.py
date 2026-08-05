@@ -46,6 +46,8 @@ def compute_soft_chunk_mask(
     M_batched = torch.zeros((P_batched.shape[0], new_tokens, total_seq_len), device=P_batched.device)
 
     for b, P in enumerate(P_batched): 
+        P_dtype = P.dtype 
+        P = P.float()
         log_P = torch.log((1-P).clamp(min=1e-8))[:, 0]
         clog_P = torch.cumsum(log_P, dim=0)
         clog_P_ij = clog_P[: , None] - clog_P[None, :]  + log_P[None, :] - log_P[:, None] 
@@ -54,7 +56,7 @@ def compute_soft_chunk_mask(
         P_same = torch.exp(log_P_same) 
         P_end = torch.tril(P[:, None, 0] * P[None, :, 0])
         M = P_same  + (1-P_same) * P_end
-
+        M = M.to(P_dtype)
         M_batched[b] = M[-new_tokens:]
     return M_batched[:, None, :, :]
 
