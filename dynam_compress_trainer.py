@@ -250,6 +250,7 @@ class ChunkerTrainer(Trainer):
         all_preds = EvalLoopContainer(self.args.eval_do_concat_batches, padding_index=-100)
         all_labels = EvalLoopContainer(self.args.eval_do_concat_batches, padding_index=-100)
         all_inputs = EvalLoopContainer(self.args.eval_do_concat_batches, padding_index=-100)
+        all_comp_rates = EvalLoopContainer(self.args.eval_do_concat_batches, padding_index=-100)
 
         metrics = None
         eval_set_kwargs = {}
@@ -274,6 +275,26 @@ class ChunkerTrainer(Trainer):
             inputs_decode = (
                 self._prepare_input(inputs[main_input_name]) if "inputs" in args.include_for_metrics else None
             )
+
+
+            chunker_inputs = deepcopy(inputs) 
+            chunker_inputs["labels"] = chunker_inputs["token_type_ids"]
+            chunker_inputs.pop("token_type_ids") 
+            chunker_outputs = self.model(**chunker_inputs)
+            chunker_logits = chunker_outputs["logits"] 
+            chunk_probs = F.sigmoid(chunker_logits) 
+            compression_rates = [] 
+            for i in range(chunk_probs.shape[0]): 
+                ctx_start = (chunker_inputs["attention_mask"][i] == 1).nonzero(as_tuple=False)[0].item()
+                ctx_end = (inputs["token_type_ids"][i] == 0).nonzero(as_tuple=False)[-1].item() + 1
+                comp_mass = chunk_probs[i][ctx_start:ctx_end, 0].sum().item()
+                total_mass = ctx_end - ctx_start
+                compression_rates.append(total_mass / comp_mass)
+            mean_comp_rate = torch.tensor(compression_rates, device=self.accelerator.device).mean()
+
+            mean_comp_rate = self.gather_function(mean_comp_rate.repeat(batch_size))
+            all_comp_rates.add(mean_comp_rate)
+
 
             if step == 0: 
                 with torch.no_grad(): 
@@ -331,6 +352,7 @@ class ChunkerTrainer(Trainer):
                 all_preds.to_cpu_and_numpy()
                 all_labels.to_cpu_and_numpy()
                 all_inputs.to_cpu_and_numpy()
+                all_comp_rates.to_cpu_and_numpy()
 
                 del losses, logits, labels, inputs
                 torch.cuda.empty_cache()
@@ -343,6 +365,7 @@ class ChunkerTrainer(Trainer):
         all_preds = all_preds.get_arrays()
         all_labels = all_labels.get_arrays()
         all_inputs = all_inputs.get_arrays()
+        all_comp_rates = all_comp_rates.get_arrays()
 
         # Number of samples
         if has_length(eval_dataset):
@@ -383,6 +406,10 @@ class ChunkerTrainer(Trainer):
             metrics[f"{metric_key_prefix}_loss"] = all_losses.mean().item()
         if hasattr(self, "model_preparation_time"):
             metrics[f"{metric_key_prefix}_model_preparation_time"] = self.model_preparation_time
+
+
+        metrics["compression_rate"] = all_comp_rates.mean().item()
+
 
         # Prefix all keys with metric_key_prefix + '_'
         for key in list(metrics.keys()):
@@ -575,9 +602,9 @@ class CompressTrainer(Trainer):
             chunk_signal = 1/(1 + torch.exp(-logits))
             # chunk_signal.retain_grad()
 
-            comp_count = ((chunker_inputs["labels"] == 1).int() + (chunker_inputs["labels"] == 2).int()).sum(dim=-1)
-            comp_mass = chunk_signal[:, :, 1:].sum(dim=(-1, -2)) 
-            # reg_loss += ((comp_count - comp_mass)**2).mean()
+            comp_count = ((chunker_inputs["labels"] == 1).int()).sum(dim=-1)
+            comp_mass = chunk_signal.sum(dim=(-1, -2)) 
+            reg_loss += ((comp_count - comp_mass)**2).mean()
             self.accelerator.wait_for_everyone()
         elif self.mask_mode == "contextless": 
             modded_ids = torch.where(inputs["token_type_ids"] == 2, inputs["token_type_ids"], 0)
@@ -823,9 +850,11 @@ class CompressTrainer(Trainer):
 
                 if step == 0: 
                     softmask = compute_soft_chunk_mask(chunk_probs, chunk_probs.shape[1], chunk_probs.shape[1])
+                    softmask_ = softmask.detach().cpu().numpy()[0, 0]
                     plt.imshow(softmask.detach().cpu().numpy()[0, 0])
+                    plt.title(f"Max: {softmask_.max()}, Min: {softmask_.min()}")
                     plt.savefig(os.path.join(self.args.output_dir, f"softmask-{self.state.global_step}.png"),dpi=300)
-
+                    pass
 
 
             # Update containers
