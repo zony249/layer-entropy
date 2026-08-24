@@ -856,7 +856,8 @@ class Qwen3Chunker(Qwen3PreTrainedModel, GenerationMixin):
         super().__init__(config)
         self.model = Qwen3Model(config)
         self.vocab_size = config.vocab_size
-        self.classifier = nn.Linear(in_features=config.hidden_size, out_features=2, bias=True)
+        self.classifier = nn.Linear(in_features=config.hidden_size, out_features=2, bias=True, device="cpu", dtype=torch.float32)
+        # nn.init.xavier_uniform_(self.classifier.weight)
 
         # Initialize weights and apply final processing
         self.post_init()
