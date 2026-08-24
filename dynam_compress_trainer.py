@@ -48,8 +48,52 @@ from accelerate.utils import (
     save_fsdp_model,
     save_fsdp_optimizer,
 )
-from trainer import Trainer, logger
+from trainer import Trainer, logger, TrainerState
 from models.compression_utils import compute_soft_chunk_mask
+from utils import compute_soft_compression_rate
+
+
+class TemperatureScheduler: 
+    def __init__(self, high:float, low:float, total_steps:int): 
+        self.high = high 
+        self.low = low 
+        self.total_steps = total_steps
+        self.sched = torch.linspace(start=self.high, end=self.low, steps=self.total_steps, requires_grad=False)
+        self.ptr = 0
+        self.prev_global_step = 0
+
+
+    def step(self, trainer_state: TrainerState | None = None): 
+        should_step = False
+        if trainer_state is not None: 
+            global_step = trainer_state.global_step 
+            if global_step != self.prev_global_step: 
+                should_step = True 
+                self.prev_global_step = global_step
+        else: 
+            should_step = True
+
+        if should_step:
+            self.ptr += 1 
+            if self.ptr >= self.total_steps: 
+                self.ptr = len(self.sched)-1 
+
+    def get_temp(self) -> float: 
+        return self.sched[self.ptr].item()
+        
+
+@dataclass
+class ChunkerTrainingArguments(TrainingArguments): 
+    def __init__(self, 
+                t_high: float = 1, 
+                t_low: float = 0.2, 
+                 *args, **kwargs): 
+        self.t_high = t_high
+        self.t_low = t_low
+        
+        super().__init__(*args, **kwargs)
+
+
 
 class ChunkerTrainer(Trainer): 
     def __init__(self, 
@@ -57,6 +101,14 @@ class ChunkerTrainer(Trainer):
                  **kwargs): 
         super().__init__(*args, **kwargs) 
         self.processing_class.padding_side = "left"
+        num_steps = int(
+            len(self.train_dataset) * self.args.num_train_epochs / self.args.per_device_train_batch_size / self.args.gradient_accumulation_steps / self.accelerator.num_processes
+        )
+        self.temp_sched = TemperatureScheduler(
+            high=self.args.t_high,
+            low=self.args.t_low,
+            total_steps=num_steps
+        )
 
     def training_step(
         self,
@@ -157,25 +209,45 @@ class ChunkerTrainer(Trainer):
         pass
         labels = inputs.pop("labels")
         inputs["labels"] = inputs["token_type_ids"] 
+        inputs["chunker_temp"] = self.temp_sched.get_temp()
+        inputs["hard"] = False # if self.state.global_step < 2000 else True
         outputs = model(**inputs)
         loss = outputs.loss 
 
-        probs = F.sigmoid(outputs.logits) 
+        probs = F.gumbel_softmax(outputs.logits, tau=inputs["chunker_temp"], hard=inputs["hard"])
+
+        comp_count = ((inputs["labels"] == 1).int()).sum(dim=-1)
+        comp_mass = probs[:, :, 1].sum(dim=-1) 
+        reg_loss = ((comp_count - comp_mass)**2 / comp_count).mean()
+
 
         # loss += 0.05 * ((probs.sum(dim=(-1, -2)) - inputs["labels"].sum(dim=1))**2).mean()
-        ctx_start = inputs["attention_mask"]
-        compression_rates = []
-        for i in range(probs.shape[0]): 
-            ctx_start = (inputs["attention_mask"][i] == 1).nonzero(as_tuple=False)[0].item()
-            ctx_end = (inputs["token_type_ids"][i] == 0).nonzero(as_tuple=False)[-1].item() + 1
-            # ctx_end = inputs["attention_mask"][i].shape[0] - ans_len 
-            comp_mass = probs[i][ctx_start:ctx_end, 0].sum().item()
-            total_mass = ctx_end - ctx_start
-            compression_rates.append(total_mass / comp_mass)
-        mean_comp_rate = torch.tensor(compression_rates, device=self.accelerator.device).mean()
+        # compression_rates = []
+        # for i in range(probs.shape[0]): 
+        #     ctx_start = (inputs["attention_mask"][i] == 1).nonzero(as_tuple=False)[0].item()
+        #     ctx_end = (inputs["token_type_ids"][i] == 0).nonzero(as_tuple=False)[-1].item() + 1
+        #     # ctx_end = inputs["attention_mask"][i].shape[0] - ans_len 
+        #     comp_mass = probs[i][ctx_start:ctx_end, 1].sum().item()
+        #     total_mass = ctx_end - ctx_start
+        #     compression_rates.append(total_mass / (comp_mass + 1))
+        # mean_comp_rate = torch.tensor(compression_rates, device=self.accelerator.device).mean()
+
+        loss += 15 * reg_loss
+
+
+        mean_comp_rate = compute_soft_compression_rate(
+            probs=probs,
+            attention_mask=inputs["attention_mask"],
+            token_type_ids=inputs["labels"]
+        )
+
 
         gathered_comp_rate = self.accelerator.gather_for_metrics(mean_comp_rate)
         self.state.comp_rate = gathered_comp_rate.mean().detach().cpu().item() 
+        self.state.temp = self.temp_sched.get_temp()
+        self.state.chunk_ent = None
+
+        self.temp_sched.step(trainer_state=self.state)
 
         return (loss, outputs) if return_outputs else loss
 
@@ -282,15 +354,12 @@ class ChunkerTrainer(Trainer):
             chunker_inputs.pop("token_type_ids") 
             chunker_outputs = self.model(**chunker_inputs)
             chunker_logits = chunker_outputs["logits"] 
-            chunk_probs = F.sigmoid(chunker_logits) 
-            compression_rates = [] 
-            for i in range(chunk_probs.shape[0]): 
-                ctx_start = (chunker_inputs["attention_mask"][i] == 1).nonzero(as_tuple=False)[0].item()
-                ctx_end = (inputs["token_type_ids"][i] == 0).nonzero(as_tuple=False)[-1].item() + 1
-                comp_mass = chunk_probs[i][ctx_start:ctx_end, 0].sum().item()
-                total_mass = ctx_end - ctx_start
-                compression_rates.append(total_mass / comp_mass)
-            mean_comp_rate = torch.tensor(compression_rates, device=self.accelerator.device).mean()
+            chunk_probs = F.gumbel_softmax(chunker_logits, tau=1, hard=True) 
+            mean_comp_rate = compute_soft_compression_rate(
+                probs=chunk_probs,
+                attention_mask=chunker_inputs["attention_mask"],
+                token_type_ids=chunker_inputs["labels"]
+            )
 
             mean_comp_rate = self.gather_function(mean_comp_rate.repeat(batch_size))
             all_comp_rates.add(mean_comp_rate)
@@ -300,10 +369,16 @@ class ChunkerTrainer(Trainer):
                 with torch.no_grad(): 
                     loss, outputs = self.compute_loss(model, inputs, return_outputs=True)
                     if self.accelerator.is_main_process:
-                        probs = 1/(1+torch.exp(-outputs.logits))
+                        probs = F.gumbel_softmax(outputs.logits, hard=False)
                         softmask = compute_soft_chunk_mask(probs, probs.shape[1], probs.shape[1])
-                        plt.imshow(softmask.detach().cpu().numpy()[0, 0])
-                        plt.savefig(os.path.join(self.args.output_dir, f"softmask-{self.state.global_step}.png"),dpi=300)
+                        plt.imshow(softmask.detach().cpu().numpy()[0, 0], vmin=0.0, vmax=1.0)
+                        plt.savefig(os.path.join(self.args.output_dir, f"{self.state.global_step:05}-softmask.png"),dpi=300)
+
+                        one_hot = F.gumbel_softmax(outputs.logits, hard=True)
+                        hardmask = compute_soft_chunk_mask(one_hot, one_hot.shape[1], one_hot.shape[1])
+                        plt.imshow(hardmask.detach().cpu().numpy()[0, 0])
+                        plt.savefig(os.path.join(self.args.output_dir, f"{self.state.global_step:05}-hardmask.png"),dpi=300)
+                        plt.close()
 
 
             # Update containers
@@ -459,6 +534,7 @@ class ChunkerTrainer(Trainer):
             # logs["uniform_chunk_diff_norm"] = self.data_collator.get_uniform_chunk_diff()
             # logs["multi_token_chunk_diff_norm"] = self.data_collator.get_multi_tok_chunk_diff()
             logs["compression_rate"] = getattr(self.state, "comp_rate", None)
+            logs["temp"] = getattr(self.state, "temp", None)
 
             self.log(logs, start_time)
 
@@ -561,10 +637,14 @@ class CompressTrainingArguments(TrainingArguments):
                  mask_mode: str = "soft", 
                  alpha_unif: float | None = None, 
                  chunk_lr: float | None = None, 
+                 t_high: float = 0.6, 
+                 t_low: float = 0.1, 
                  *args, **kwargs): 
         self.mask_mode = mask_mode 
         self.alpha_unif = alpha_unif if alpha_unif is not None else 0
         self.chunk_lr = chunk_lr if chunk_lr is not None else 0
+        self.t_high = t_high 
+        self.t_low = t_low
         super().__init__(*args, **kwargs)
 
 
@@ -579,6 +659,16 @@ class CompressTrainer(Trainer):
         self.alpha_unif = kwargs["args"].alpha_unif
         super().__init__(*args, **kwargs)
         self.processing_class.padding_side = "left"
+
+        num_steps = int(
+            len(self.train_dataset) * self.args.num_train_epochs / self.args.per_device_train_batch_size / self.args.gradient_accumulation_steps / self.accelerator.num_processes
+        )
+        self.temp_sched = TemperatureScheduler(
+            high=self.args.t_high,
+            low=self.args.t_low,
+            total_steps=num_steps
+        )
+
     
     def compute_loss(
         self,
@@ -587,28 +677,40 @@ class CompressTrainer(Trainer):
         return_outputs: bool = False,
         num_items_in_batch: torch.Tensor | int | None = None, 
     ) -> torch.Tensor | tuple[torch.Tensor, Any]: 
-        reg_loss = torch.tensor(0, device=self.chunking_model.device)
+        reg_loss = torch.tensor(0., device=self.accelerator.device)
+        token_type_ids = inputs["token_type_ids"]
         if self.mask_mode == "hard": 
-            chunk_signal = F.one_hot(inputs["token_type_ids"], num_classes=3)
+            chunk_signal = F.one_hot(inputs["token_type_ids"], num_classes=2).float()
         elif self.mask_mode == "soft":
             chunker_inputs = deepcopy(inputs) 
             chunker_inputs["labels"] = inputs["token_type_ids"]
+            # chunker_inputs["chunker_temp"] = self.temp_sched.get_temp()
+            # chunker_inputs["hard"] = False
             chunker_inputs.pop("token_type_ids")
             chunker_outputs = self.chunking_model(**chunker_inputs)
 
-            logits = chunker_outputs["logits"] 
-            reg_loss = chunker_outputs["loss"]
+            # logits = chunker_outputs["logits"] 
+            # reg_loss = chunker_outputs["loss"]
 
-            chunk_signal = 1/(1 + torch.exp(-logits))
-            # chunk_signal.retain_grad()
+            chunk_signal = F.gumbel_softmax(
+                logits=chunker_outputs["logits"],
+                tau=self.temp_sched.get_temp(),
+                hard=False
+            )
 
-            comp_count = ((chunker_inputs["labels"] == 1).int()).sum(dim=-1)
-            comp_mass = chunk_signal.sum(dim=(-1, -2)) 
-            reg_loss += ((comp_count - comp_mass)**2).mean()
+            comp_count = ((chunker_inputs["labels"] == 1).float()).sum(dim=-1)
+            comp_mass = chunk_signal[:, :, 1].sum(dim=-1) 
+            reg_loss += ((comp_count - comp_mass)**2 / comp_count).mean()
             self.accelerator.wait_for_everyone()
         elif self.mask_mode == "contextless": 
-            modded_ids = torch.where(inputs["token_type_ids"] == 2, inputs["token_type_ids"], 0)
-            chunk_signal = F.one_hot(modded_ids, num_classes=3)
+            modded_ids_lst = []
+            for i in range(inputs["attention_mask"].shape[0]):
+                ctx_end = (token_type_ids[i] == 0).nonzero(as_tuple=False)[-1].item() + 1
+                mod_ids = inputs["token_type_ids"][i] 
+                mod_ids[:ctx_end] = 0
+                modded_ids_lst.append(mod_ids)
+            modded_ids = torch.stack(modded_ids_lst, dim=0)
+            chunk_signal = F.one_hot(modded_ids, num_classes=2)
         elif self.mask_mode == "full": 
             chunk_signal = None 
 
@@ -627,8 +729,20 @@ class CompressTrainer(Trainer):
         # We don't use .loss here since the model may return tuples instead of ModelOutput.
         loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
 
-        self.state.regularization_loss = reg_loss.detach().cpu().item() 
-        self.state.ce_loss = loss.detach().cpu().item()
+        with torch.no_grad():
+            mean_comp_rate = compute_soft_compression_rate(
+                probs=chunk_signal,
+                attention_mask=inputs["attention_mask"],
+                token_type_ids=token_type_ids
+            )
+            self.state.regularization_loss = reg_loss.detach().cpu().item() 
+            self.state.ce_loss = loss.detach().cpu().item()
+
+            gathered_comp_rate = self.accelerator.gather_for_metrics(mean_comp_rate)
+            self.state.comp_rate = gathered_comp_rate.mean().detach().cpu().item() 
+            self.state.temp = self.temp_sched.get_temp()
+
+            self.temp_sched.step(self.state)
 
         train_mode = torch.is_grad_enabled()
         if train_mode: 
@@ -645,12 +759,13 @@ class CompressTrainer(Trainer):
 
     def _prepare_for_training(self, max_steps, train_dataloader, resume_from_checkpoint):
         model, train_dataloader = super()._prepare_for_training(max_steps, train_dataloader, resume_from_checkpoint)
-        self.chunking_model = self.chunking_model.to(self.accelerator.device)
-        if self.accelerator.num_processes > 1: 
-            self.chunking_model = DDP(self.chunking_model, device_ids=[self.accelerator.device.index])
-        chunk_optim_cls, chunk_optim_kwargs = self.get_optimizer_cls_and_kwargs(self.args, self.chunking_model)
-        chunk_optim_kwargs["lr"] = self.args.chunk_lr
-        self.chunk_optim = chunk_optim_cls(params=self.chunking_model.parameters(), **chunk_optim_kwargs)
+        if self.chunking_model is not None:
+            self.chunking_model = self.chunking_model.to(self.accelerator.device)
+            if self.accelerator.num_processes > 1: 
+                self.chunking_model = DDP(self.chunking_model, device_ids=[self.accelerator.device.index])
+            chunk_optim_cls, chunk_optim_kwargs = self.get_optimizer_cls_and_kwargs(self.args, self.chunking_model)
+            chunk_optim_kwargs["lr"] = self.args.chunk_lr
+            self.chunk_optim = chunk_optim_cls(params=self.chunking_model.parameters(), **chunk_optim_kwargs)
         self.accelerator.wait_for_everyone()
         return model, train_dataloader
     
@@ -695,6 +810,8 @@ class CompressTrainer(Trainer):
             # logs["multi_token_chunk_diff_norm"] = self.data_collator.get_multi_tok_chunk_diff()
             logs["ce_loss"] = getattr(self.state, "ce_loss", None)
             logs["reg_loss"] = getattr(self.state, "regularization_loss", None)
+            logs["temp"] = getattr(self.state, "temp", None)
+            logs["compression_rate"] = getattr(self.state, "comp_rate", None)
 
             self.log(logs, start_time)
 
@@ -710,30 +827,65 @@ class CompressTrainer(Trainer):
             self._save_checkpoint(model, trial)
             self.control = self.callback_handler.on_save(self.args, self.state, self.control)
 
-            best_tfmr_path = os.path.join(self.args.output_dir, "best_tfmr")
-            best_chunker_path = os.path.join(self.args.output_dir, "best_chunker")
-            if self.is_fsdp_enabled:
-                unwrapped_model = self.accelerator.unwrap_model(self.model)
-                unwrapped_model.save_pretrained(
-                        best_tfmr_path,
-                        is_main_process=self.accelerator.is_main_process,
-                        save_function=self.accelerator.save,
-                        state_dict=self.accelerator.get_state_dict(model))
-                self.processing_class.save_pretrained(best_tfmr_path)
+            if self.args.save_strategy == "best":
+                best_tfmr_path = os.path.join(self.args.output_dir, "best_tfmr")
+                best_chunker_path = os.path.join(self.args.output_dir, "best_chunker")
+                if self.is_fsdp_enabled:
+                    unwrapped_model = self.accelerator.unwrap_model(self.model)
+                    unwrapped_model.save_pretrained(
+                            best_tfmr_path,
+                            is_main_process=self.accelerator.is_main_process,
+                            save_function=self.accelerator.save,
+                            state_dict=self.accelerator.get_state_dict(model))
+                    self.processing_class.save_pretrained(best_tfmr_path)
 
-            elif self.accelerator.unwrap_model(self.model) == self.model:
-                self.model.save_pretrained(best_tfmr_path)
-                self.processing_class.save_pretrained(best_tfmr_path)
-            else:
-                raise NotImplementedError("Implement saving for distributed model")
+                elif self.accelerator.unwrap_model(self.model) == self.model:
+                    self.model.save_pretrained(best_tfmr_path)
+                    self.processing_class.save_pretrained(best_tfmr_path)
+                else:
+                    raise NotImplementedError("Implement saving for distributed model")
 
-            if self.chunking_model is not None:
-                if isinstance(self.chunking_model, DDP): 
-                    chunking_model = self.chunking_model.module 
-                else: 
-                    chunking_model = self.chunking_model 
-                chunking_model.save_pretrained(best_chunker_path)
+                if self.chunking_model is not None:
+                    if isinstance(self.chunking_model, DDP): 
+                        chunking_model = self.chunking_model.module 
+                    else: 
+                        chunking_model = self.chunking_model 
+                    chunking_model.save_pretrained(best_chunker_path)
 
+
+    def save_model(self, output_dir: str | None = None, _internal_call: bool = False) -> None:
+        """
+        Will save the model, so you can reload it using `from_pretrained()`.
+
+        Will only save from the main process.
+        """
+
+        if output_dir is None:
+            output_dir = self.args.output_dir
+
+        chunker_path = os.path.join(output_dir, "chunker") 
+        if self.chunking_model is not None: 
+            if isinstance(self.chunking_model, DDP): 
+                chunking_model = self.chunking_model.module 
+            else: 
+                chunking_model = self.chunking_model 
+            chunking_model.save_pretrained(chunker_path)
+
+        if self.is_fsdp_enabled:
+            unwrapped_model = self.accelerator.unwrap_model(self.model)
+            unwrapped_model.save_pretrained(
+                    output_dir,
+                    is_main_process=self.accelerator.is_main_process,
+                    save_function=self.accelerator.save,
+                    state_dict=self.accelerator.get_state_dict(self.model))
+            self.processing_class.save_pretrained(output_dir)
+
+        elif self.args.should_save:
+            self._save(output_dir)
+
+        # Push to the Hub when `save_model` is called by the user.
+        if self.args.push_to_hub and not _internal_call:
+            self.push_to_hub(commit_message="Model save", revision=self.args.hub_revision)
 
     def evaluation_loop(
         self,
@@ -829,32 +981,41 @@ class CompressTrainer(Trainer):
             inputs_decode = (
                 self._prepare_input(inputs[main_input_name]) if "inputs" in args.include_for_metrics else None
             )
-            if self.chunking_model is not None:
+
+            ### visualizing chunked attention mask ###
+            if self.mask_mode == "soft":
                 chunker_inputs = deepcopy(inputs) 
                 chunker_inputs["labels"] = chunker_inputs["token_type_ids"]
-                chunker_inputs.pop("token_type_ids") 
+                token_type_ids = chunker_inputs.pop("token_type_ids") 
                 chunker_outputs = self.chunking_model(**chunker_inputs)
                 chunker_logits = chunker_outputs["logits"] 
-                chunk_probs = F.sigmoid(chunker_logits) 
-                compression_rates = [] 
-                for i in range(chunk_probs.shape[0]): 
-                    ctx_start = (chunker_inputs["attention_mask"][i] == 1).nonzero(as_tuple=False)[0].item()
+                chunk_probs = F.gumbel_softmax(chunker_logits, hard=True) 
+            elif self.mask_mode == "full":
+                token_types = torch.ones_like(inputs["attention_mask"])
+                chunk_probs = F.one_hot(token_types, num_classes=2)
+            elif self.mask_mode == "contextless": 
+                modded_ids_lst = []
+                for i in range(inputs["attention_mask"].shape[0]):
                     ctx_end = (inputs["token_type_ids"][i] == 0).nonzero(as_tuple=False)[-1].item() + 1
-                    comp_mass = chunk_probs[i][ctx_start:ctx_end, 0].sum().item()
-                    total_mass = ctx_end - ctx_start
-                    compression_rates.append(total_mass / comp_mass)
-                mean_comp_rate = torch.tensor(compression_rates, device=self.accelerator.device).mean()
+                    mod_ids = inputs["token_type_ids"][i] 
+                    mod_ids[:ctx_end] = 0
+                    modded_ids_lst.append(mod_ids)
+                modded_ids = torch.stack(modded_ids_lst, dim=0)
+                chunk_probs = F.one_hot(modded_ids, num_classes=2)
+            elif self.mask_mode == "hard": 
+                chunk_probs = F.one_hot(inputs["token_type_ids"], num_classes=2).float()
 
-                mean_comp_rate = self.gather_function(mean_comp_rate.repeat(batch_size))
-                all_comp_rates.add(mean_comp_rate)
+            mean_comp_rate = compute_soft_compression_rate(chunk_probs, inputs["attention_mask"], inputs["token_type_ids"])
+            mean_comp_rate = self.gather_function(mean_comp_rate.repeat(batch_size))
+            all_comp_rates.add(mean_comp_rate)
 
-                if step == 0: 
-                    softmask = compute_soft_chunk_mask(chunk_probs, chunk_probs.shape[1], chunk_probs.shape[1])
-                    softmask_ = softmask.detach().cpu().numpy()[0, 0]
-                    plt.imshow(softmask.detach().cpu().numpy()[0, 0])
-                    plt.title(f"Max: {softmask_.max()}, Min: {softmask_.min()}")
-                    plt.savefig(os.path.join(self.args.output_dir, f"softmask-{self.state.global_step}.png"),dpi=300)
-                    pass
+            if step == 0: 
+                softmask = compute_soft_chunk_mask(chunk_probs, inputs["attention_mask"].shape[1], inputs["attention_mask"].shape[1])
+                softmask_ = softmask.detach().cpu().numpy()[0, 0]
+                plt.imshow(softmask.detach().cpu().numpy()[0, 0])
+                plt.title(f"Max: {softmask_.max()}, Min: {softmask_.min()}")
+                plt.savefig(os.path.join(self.args.output_dir, f"softmask-{self.state.global_step}.png"),dpi=300)
+                pass
 
 
             # Update containers
