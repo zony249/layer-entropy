@@ -856,7 +856,7 @@ class Qwen3Chunker(Qwen3PreTrainedModel, GenerationMixin):
         super().__init__(config)
         self.model = Qwen3Model(config)
         self.vocab_size = config.vocab_size
-        self.classifier = nn.Linear(in_features=config.hidden_size, out_features=1, bias=True)
+        self.classifier = nn.Linear(in_features=config.hidden_size, out_features=2, bias=True)
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -925,13 +925,10 @@ class Qwen3Chunker(Qwen3PreTrainedModel, GenerationMixin):
         # logits = self.classifier(hidden_states[:, slice_indices, :])
         logits = self.classifier(hidden_states)
 
-
         loss = None
         if labels is not None:
-            labels_f = labels.float()[...,None]
-            P = F.sigmoid(logits)
-            ce_loss = -labels_f * torch.log(P.clamp(min=1e-8)) - (1-labels_f) * torch.log((1-P).clamp(min=1e-8))
-            loss = ce_loss.mean()
+            loss = F.cross_entropy(input=logits.view(-1, 2), target=labels.view(-1), label_smoothing=0.8)
+            
 
         return CausalLMOutputWithPast(
             loss=loss,
@@ -1292,12 +1289,12 @@ class ZipQwen3Model(Qwen3PreTrainedModel):
 
         if chunk_signal is None: 
             token_types: torch.LongTensor = torch.ones_like(attention_mask).long() 
-            chunk_signal: torch.Tensor = token_types.to(dtype=hidden_states.dtype, device=hidden_states.device)
+            chunk_signal: torch.Tensor = F.one_hot(token_types, num_classes=2)
 
         seq_len = attention_mask.shape[-1] 
         if chunk_signal.shape[1] < seq_len: 
             extension = torch.ones(attention_mask.shape[0], seq_len-chunk_signal.shape[1], dtype=torch.long, device=chunk_signal.device) 
-            extension_probs = extension.to(chunk_signal.dtype)[:, :, None]
+            extension_probs = F.one_hot(extension, num_classes=2)
             chunk_signal = torch.cat([chunk_signal, extension_probs], dim=1)
         
         chunk_mask = self.compute_soft_chunk_mask(P_batched=chunk_signal, new_tokens=input_ids.shape[-1], total_seq_len=attention_mask.shape[-1])
@@ -1329,7 +1326,7 @@ class ZipQwen3Model(Qwen3PreTrainedModel):
         total_seq_len: int
     ) -> torch.Tensor: 
         """
-        P_batched: [batch, seq_len, 3]
+        P_batched: [batch, seq_len, 2]
         """
         return compute_soft_chunk_mask(P_batched, new_tokens, total_seq_len)
 
