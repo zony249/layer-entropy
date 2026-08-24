@@ -406,6 +406,7 @@ class ChunkCollator(DataCollatorMixin):
         self.validation_mode = validation_mode
 
         self.compression_rate = self.args.compression_rate
+        self.add_sink = self.args.add_sink
     
     def __call__(self, examples: Any) -> BatchEncoding: 
         """
@@ -467,6 +468,20 @@ class ChunkCollator(DataCollatorMixin):
             else: 
                 token_type_ids_rev.append(0) 
             i+=1 
+
+        if self.add_sink: 
+            i = len(token_type_ids_rev) - 1 
+            count_ones = 0
+            while i > 0: 
+                if token_type_ids_rev[i] == 1: 
+                    count_ones += 1 
+                    token_type_ids_rev.pop(i) 
+                if count_ones >= 3: 
+                    break 
+                i -= 1
+            token_type_ids_rev += [1 for _ in range(count_ones)]
+
+
         
         labels = torch.cat([torch.ones(len(ctx_ids)) * -100, 
                             torch.ones(len(que_ids)) * -100, 
@@ -501,6 +516,20 @@ class ChunkCollator(DataCollatorMixin):
             else: 
                 token_type_ids_rev.append(0) 
             i+=1 
+
+        if self.add_sink: 
+            i = len(token_type_ids_rev) - 1 
+            count_ones = 0
+            while i > 0: 
+                if token_type_ids_rev[i] == 1: 
+                    count_ones += 1 
+                    token_type_ids_rev.pop(i) 
+                if count_ones >= 3: 
+                    break 
+                i -= 1
+            token_type_ids_rev += [1 for _ in range(count_ones)]
+
+
 
         token_type_ids_rev = [1 for _ in range(len(que_ids))] + token_type_ids_rev 
         token_type_ids = token_type_ids_rev[::-1]
@@ -995,8 +1024,42 @@ def compute_reg_cosine_chunking(
     return merge_dict
 
 
+def compute_soft_compression_rate(
+    probs: torch.Tensor | None,
+    attention_mask: torch.Tensor, 
+    token_type_ids: torch.Tensor, 
+    compute_mean: bool = True, 
+) -> torch.Tensor: 
+    """
+    args: 
+        probs: torch.Tensor[batch, sequence, 2]
+            2-way softmax probabilities
+        attention_mask: torch.Tensor[batch, sequence] 
+            boolean attention mask
+        token_type_ids: torch.Tensor[batch, sequence]
+            token type (either 0 or 1)
+    """
+    if probs is None: 
+        token_types = torch.ones_like(attention_mask)
+        probs = F.one_hot(token_types, num_classes=2)
 
+    compression_rates = []
+    for i in range(probs.shape[0]): 
+        ctx_start = (attention_mask[i] == 1).nonzero(as_tuple=False)[0].item()
+        try:
+            ctx_end = (token_type_ids[i] == 0).nonzero(as_tuple=False)[-1].item() + 1
+        except IndexError:
+            ctx_end = len(attention_mask[i])
+        # ctx_end = inputs["attention_mask"][i].shape[0] - ans_len 
+        comp_mass = probs[i][ctx_start:ctx_end, 1].sum().item()
+        total_mass = ctx_end - ctx_start
+        compression_rates.append((total_mass + 1) / (comp_mass + 1))
+    comp_rates = torch.tensor(compression_rates, device=probs.device)
 
+    if compute_mean: 
+        mean_comp_rate = comp_rates.mean()
+        return mean_comp_rate
+    return comp_rates.flatten()
 
 
 
