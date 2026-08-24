@@ -43,8 +43,7 @@ from utils import (
     compute_norm_of_diffs
 )
 from exp_args import parse_chunk_exp_args, join_args
-from utils import DefaultArgs, ChunkCollator
-
+from utils import DefaultArgs, ChunkCollator, compute_soft_compression_rate
 
 
 def collate_fn(batch,
@@ -247,7 +246,15 @@ if __name__ == "__main__":
     experiment_args, _ = parse_chunk_exp_args(unknown)
     args = join_args(experiment_args, general_args)
 
-    model = ZipQwen3ForCausalLM.from_pretrained(args.model)
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # max_memory_mapping = {
+    #     0: "8GiB",   
+    #     1: "30GiB",   
+    # }
+
+    model = ZipQwen3ForCausalLM.from_pretrained(args.model, device_map="auto")
     tok = AutoTokenizer.from_pretrained(args.model, padding_side="left")
 
     align_special_tokens(tok, model)
@@ -256,7 +263,7 @@ if __name__ == "__main__":
 
     entropy_model = None
 
-    chunking_model = Qwen3Chunker.from_pretrained(args.chunking_model) if args.chunking_model is not None else None
+    chunking_model = Qwen3Chunker.from_pretrained(args.chunking_model, device_map="auto") if args.chunking_model is not None else None
     valset = load_dataset("rajpurkar/squad_v2")["validation"]#.select(range(100))
 
 
@@ -269,9 +276,11 @@ if __name__ == "__main__":
                          collate_fn=collator)
 
     accelerator = Accelerator()
-    model, tok, dloader = accelerator.prepare(model, tok, dloader)
-    chunking_model = accelerator.prepare_model(chunking_model, evaluation_mode=True) if chunking_model is not None else None
+    # model, tok, dloader = accelerator.prepare(model, tok, dloader)
+    # chunking_model = accelerator.prepare_model(chunking_model, evaluation_mode=True) if chunking_model is not None else None
     model.eval()
+    if chunking_model is not None: 
+        chunking_model.eval()
 
     gen_config = {
         "num_beams": 1,
@@ -283,32 +292,45 @@ if __name__ == "__main__":
 
     all_preds = []
     all_references = []
+    all_comp_rates = []
 
     tbar = tqdm(dloader, desc="Evaluating")
 
-    i=0
+    idx=0
     for batch, reference in tbar:
+        device_type = chunking_model.device
+        batch = batch.to(device_type)
         batch.pop("labels")
         token_type_ids = batch.pop("token_type_ids")
 
         if args.mask_mode == "hard": 
-            chunk_signal = token_type_ids[:, :, None].float()
+            chunk_signal = F.one_hot(token_type_ids, num_classes=2).float()
         elif args.mask_mode == "soft": 
             chunker_inputs = deepcopy(batch) 
             # chunker_inputs["labels"] = token_type_ids
             with torch.no_grad():
                 logits = chunking_model(**chunker_inputs)["logits"]
-            chunk_signal = F.sigmoid(logits)
+            chunk_signal = F.gumbel_softmax(logits, hard=True)
         elif args.mask_mode == "contextless":
-            modded_ids = torch.where(token_type_ids == 2, token_type_ids, 0)
-            chunk_signal = F.one_hot(modded_ids, num_classes=3)
+            modded_ids_lst = []
+            for j in range(batch["attention_mask"].shape[0]):
+                ctx_end = (token_type_ids[j] == 0).nonzero(as_tuple=False)[-1].item() + 1
+                mod_ids = token_type_ids[j] 
+                mod_ids[:ctx_end] = 0
+                modded_ids_lst.append(mod_ids)
+            modded_ids = torch.stack(modded_ids_lst, dim=0)
+            chunk_signal = F.one_hot(modded_ids, num_classes=2)
         elif args.mask_mode == "full":
-            chunk_signal = None 
+            token_types = torch.ones_like(batch["attention_mask"])
+            chunk_signal = F.one_hot(token_types, num_classes=2)
         
         batch["chunk_signal"] = chunk_signal 
 
+        compression_rates = compute_soft_compression_rate(chunk_signal, batch["attention_mask"], token_type_ids, compute_mean=False)
+        all_comp_rates.append(compression_rates)
 
-
+        device_type = model.device
+        batch = batch.to(device_type)
 
         with torch.no_grad():
             preds = model.generate(**batch, **gen_config)
@@ -321,16 +343,24 @@ if __name__ == "__main__":
         [print(p, "||", r["answers"]["text"][0] if len(r["answers"]["text"]) > 0 else "Not enough information.") for p, r in zip(preds_decoded, reference)]
         all_preds += preds_dict
         all_references += reference
-        if i > 1000: 
-            break
-        if i == 0:
-            softmask = model.model.compute_soft_chunk_mask(chunk_signal, chunk_signal.shape[1], chunk_signal.shape[1])
-            plt.imshow(softmask.detach().cpu().numpy()[0, 0])
-            plt.savefig(os.path.join(args.output_dir, "visualization.png"), dpi=300)
-        i+=1 
+        # if idx > 10: 
+        #     break
+        if idx%10 == 0:
+            softmask = model.model.compute_soft_chunk_mask(chunk_signal, batch["attention_mask"].shape[1], batch["attention_mask"].shape[1])
+            softmask = softmask.detach().cpu()[0, 0] # isolate just the first one of the batch 
+            softmask *= batch["attention_mask"][0][:, None].cpu() * batch["attention_mask"][0][None, :].cpu() # mask out padding tokens
+            plt.imshow(softmask.numpy())
+            plt.savefig(os.path.join(args.output_dir, f"visualization_{idx:04}.png"), dpi=300)
+            plt.close()
+        idx+=1 
+
+
 
     all_preds = accelerator.gather_for_metrics(all_preds, True)
     all_references = accelerator.gather_for_metrics(all_references, True)
+    all_comp_rates = accelerator.gather_for_metrics(all_comp_rates, True)
+    mean_comp_rate = torch.cat(all_comp_rates, dim=-1).mean().item()
+    std_comp_rate = torch.std(torch.cat(all_comp_rates, dim=-1).flatten()).item()
 
     if os.path.exists("runs/eval"):
         shutil.rmtree("runs/eval")
@@ -345,4 +375,6 @@ if __name__ == "__main__":
 
     squad_v2_metric = evaluate.load("squad_v2")
     results = squad_v2_metric.compute(predictions=all_preds, references=all_references)
+    results["compression_rate"] = mean_comp_rate
+    results["std_comp_rate"] = std_comp_rate
     print(results)
