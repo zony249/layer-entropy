@@ -61,8 +61,30 @@ def compute_soft_chunk_mask(
     return M_batched[:, None, :, :]
 
 
+def compute_soft_chunk_mask(
+        P_batched: torch.Tensor, 
+        new_tokens: int, 
+        total_seq_len: int, 
+) -> torch.Tensor: 
+    """
+    P_batched: [batch, seq_len, 2]
+    """
+    M_batched = torch.zeros((P_batched.shape[0], new_tokens, total_seq_len), device=P_batched.device)
 
-
+    for b, P in enumerate(P_batched): 
+        P_dtype = P.dtype
+        P = P.float()
+        log_P = torch.log(P[:, 0].clamp(min=1e-8)) 
+        clog_P = torch.cumsum(log_P, dim=0) 
+        clog_P_ij = clog_P[:, None] - clog_P[None, :] + log_P[None, :] - log_P[:, None] 
+        causal_mask = torch.tril(torch.ones(clog_P_ij.shape, dtype=bool, device=P.device))
+        log_P_same = torch.where(causal_mask, clog_P_ij, torch.finfo(P.dtype).min * 1e-2) 
+        P_same = torch.exp(log_P_same)
+        P_end = torch.tril(P[:, 1][:, None] * P[:, 1][None, :])
+        M = P_same  + (1-P_same) * P_end
+        M = M.to(P_dtype)
+        M_batched[b] = M[-new_tokens:]
+    return M_batched[:, None, :, :]
 
 
 def find_idx(input_ids: torch.LongTensor, 
