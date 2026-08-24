@@ -44,6 +44,7 @@ def parse_chunk_exp_args(other_args: List | None = None) -> Namespace:
 
     parser.add_argument("--compression_rate", type=float, default=1)
     parser.add_argument("--mask_mode", type=str, default="soft", choices=["hard", "soft", "full", "contextless"])
+    parser.add_argument("--add_sink", action="store_true", default=False)
 
     if other_args is None: 
         other_args = []
