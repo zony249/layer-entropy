@@ -54,6 +54,7 @@ if __name__ == "__main__":
     parser.add_argument("--alpha_unif", type=float, default=0.0)
     parser.add_argument("--chunk_lr", type=float, default=0.0)
     parser.add_argument("--chunker_layers", type=int, default=None)
+    # parser.add_argument("--add_sink", action="store_true", default=False)
 
     training_specific_args, unknown = parser.parse_known_args() 
     general_args, unknown = parse_chunk_exp_args(unknown)
@@ -61,7 +62,7 @@ if __name__ == "__main__":
 
     assert args.model is not None, f"Pre-trained model must be specified"
     compress_model = ZipQwen3ForCausalLM.from_pretrained(args.model)
-    tokenizer = AutoTokenizer.from_pretrained(args.chunking_model)
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
 
     
     chunk_model = Qwen3Chunker.from_pretrained(args.chunking_model, num_layers=args.chunker_layers) if args.chunking_model is not None else None 
@@ -103,12 +104,14 @@ if __name__ == "__main__":
         eval_strategy="steps", 
         eval_steps=args.eval_steps, 
         eval_delay=500, 
-        save_strategy="best", 
+        save_strategy="steps", 
         greater_is_better=False, 
         save_steps=args.eval_steps, 
         remove_unused_columns=False, 
         metric_for_best_model="loss",
-        eval_on_start=True, 
+        # max_grad_norm=10, 
+        # eval_on_start=True, 
+        # save_only_model=True, 
         
         mask_mode=args.mask_mode, 
         alpha_unif=args.alpha_unif, 
