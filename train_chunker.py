@@ -19,7 +19,7 @@ from transformers import (
 from accelerate import Accelerator
 import wandb
 
-from dynam_compress_trainer import ChunkerTrainer 
+from dynam_compress_trainer import ChunkerTrainer, ChunkerTrainingArguments
 from models.modeling_qwen3 import (
     Qwen3ForCausalLM, 
     Qwen3Chunker, 
@@ -81,7 +81,7 @@ if __name__ == "__main__":
         collator_args=args
     )
 
-    training_args = TrainingArguments(
+    training_args = ChunkerTrainingArguments(
         output_dir=args.output_dir, 
         per_device_train_batch_size=args.per_device_batch_size, 
         num_train_epochs=args.epochs, 
@@ -94,10 +94,12 @@ if __name__ == "__main__":
         report_to="wandb", 
         eval_strategy="steps", 
         eval_steps=args.eval_steps, 
-        eval_delay=500, 
+        # eval_delay=500, 
         save_strategy="steps", 
         save_steps=args.eval_steps, 
         remove_unused_columns=False, 
+        t_high=0.8, 
+        t_low=0.2
     )
 
     trainer = ChunkerTrainer(
