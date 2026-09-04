@@ -79,8 +79,32 @@ class TemperatureScheduler:
                 self.ptr = len(self.sched)-1 
 
     def get_temp(self) -> float: 
-        return self.sched[self.ptr].item()
+        return max(self.sched[self.ptr].item(), 0)
         
+
+class ExpTemperatureScheduler: 
+    def __init__(self, initial: float, decay: float = 0.999): 
+
+        self.cur = initial 
+        self.decay = decay
+        self.prev_global_step = 0
+
+    def step(self, trainer_state:TrainerState | None = None): 
+        should_step = False
+        if trainer_state is not None: 
+            global_step = trainer_state.global_step 
+            if global_step != self.prev_global_step: 
+                should_step = True 
+                self.prev_global_step = global_step
+        else: 
+            should_step = True
+
+        if should_step:
+            self.cur *= self.decay
+
+    def get_temp(self) -> float: 
+        return self.cur
+
 
 @dataclass
 class ChunkerTrainingArguments(TrainingArguments): 
@@ -214,25 +238,13 @@ class ChunkerTrainer(Trainer):
         outputs = model(**inputs)
         loss = outputs.loss 
 
-        probs = F.gumbel_softmax(outputs.logits, tau=inputs["chunker_temp"], hard=inputs["hard"])
+        probs = F.gumbel_softmax(outputs.logits, tau=inputs["chunker_temp"], hard=False)
 
         comp_count = ((inputs["labels"] == 1).int()).sum(dim=-1)
         comp_mass = probs[:, :, 1].sum(dim=-1) 
         reg_loss = ((comp_count - comp_mass)**2 / comp_count).mean()
 
-
-        # loss += 0.05 * ((probs.sum(dim=(-1, -2)) - inputs["labels"].sum(dim=1))**2).mean()
-        # compression_rates = []
-        # for i in range(probs.shape[0]): 
-        #     ctx_start = (inputs["attention_mask"][i] == 1).nonzero(as_tuple=False)[0].item()
-        #     ctx_end = (inputs["token_type_ids"][i] == 0).nonzero(as_tuple=False)[-1].item() + 1
-        #     # ctx_end = inputs["attention_mask"][i].shape[0] - ans_len 
-        #     comp_mass = probs[i][ctx_start:ctx_end, 1].sum().item()
-        #     total_mass = ctx_end - ctx_start
-        #     compression_rates.append(total_mass / (comp_mass + 1))
-        # mean_comp_rate = torch.tensor(compression_rates, device=self.accelerator.device).mean()
-
-        loss += 15 * reg_loss
+        loss += 1 * reg_loss
 
 
         mean_comp_rate = compute_soft_compression_rate(
@@ -370,13 +382,15 @@ class ChunkerTrainer(Trainer):
                     loss, outputs = self.compute_loss(model, inputs, return_outputs=True)
                     if self.accelerator.is_main_process:
                         probs = F.gumbel_softmax(outputs.logits, hard=False)
-                        softmask = compute_soft_chunk_mask(probs, probs.shape[1], probs.shape[1])
-                        plt.imshow(softmask.detach().cpu().numpy()[0, 0], vmin=0.0, vmax=1.0)
+                        softmask = compute_soft_chunk_mask(probs, probs.shape[1], probs.shape[1])[0, 0]
+                        softmask *= inputs["attention_mask"][0][:, None] * inputs["attention_mask"][0][None, :] # mask out padding tokens
+                        plt.imshow(softmask.detach().cpu().numpy(), vmin=0.0, vmax=1.0)
                         plt.savefig(os.path.join(self.args.output_dir, f"{self.state.global_step:05}-softmask.png"),dpi=300)
 
                         one_hot = F.gumbel_softmax(outputs.logits, hard=True)
-                        hardmask = compute_soft_chunk_mask(one_hot, one_hot.shape[1], one_hot.shape[1])
-                        plt.imshow(hardmask.detach().cpu().numpy()[0, 0])
+                        hardmask = compute_soft_chunk_mask(one_hot, one_hot.shape[1], one_hot.shape[1])[0, 0]
+                        hardmask *= inputs["attention_mask"][0][:, None] * inputs["attention_mask"][0][None, :] # mask out padding tokens
+                        plt.imshow(hardmask.detach().cpu().numpy())
                         plt.savefig(os.path.join(self.args.output_dir, f"{self.state.global_step:05}-hardmask.png"),dpi=300)
                         plt.close()
 
@@ -637,14 +651,16 @@ class CompressTrainingArguments(TrainingArguments):
                  mask_mode: str = "soft", 
                  alpha_unif: float | None = None, 
                  chunk_lr: float | None = None, 
-                 t_high: float = 0.6, 
-                 t_low: float = 0.1, 
+                 t_high: float = 0.2, 
+                 t_low: float = 0, 
+                 temp_decay: float = 0.999,  
                  *args, **kwargs): 
         self.mask_mode = mask_mode 
         self.alpha_unif = alpha_unif if alpha_unif is not None else 0
         self.chunk_lr = chunk_lr if chunk_lr is not None else 0
         self.t_high = t_high 
         self.t_low = t_low
+        self.temp_decay = temp_decay
         super().__init__(*args, **kwargs)
 
 
@@ -663,10 +679,9 @@ class CompressTrainer(Trainer):
         num_steps = int(
             len(self.train_dataset) * self.args.num_train_epochs / self.args.per_device_train_batch_size / self.args.gradient_accumulation_steps / self.accelerator.num_processes
         )
-        self.temp_sched = TemperatureScheduler(
-            high=self.args.t_high,
-            low=self.args.t_low,
-            total_steps=num_steps
+        self.temp_sched = ExpTemperatureScheduler(
+            initial=self.args.t_high,
+            decay=self.args.temp_decay
         )
 
     
@@ -689,19 +704,27 @@ class CompressTrainer(Trainer):
             chunker_inputs.pop("token_type_ids")
             chunker_outputs = self.chunking_model(**chunker_inputs)
 
-            # logits = chunker_outputs["logits"] 
             # reg_loss = chunker_outputs["loss"]
+
+            temp = self.temp_sched.get_temp() 
+            hard=True
 
             chunk_signal = F.gumbel_softmax(
                 logits=chunker_outputs["logits"],
-                tau=self.temp_sched.get_temp(),
-                hard=False
+                tau=temp, 
+                hard=hard
             )
+            chunk_signal = chunk_signal.to(reg_loss.dtype)
 
-            comp_count = ((chunker_inputs["labels"] == 1).float()).sum(dim=-1)
-            comp_mass = chunk_signal[:, :, 1].sum(dim=-1) 
-            reg_loss += ((comp_count - comp_mass)**2 / comp_count).mean()
+            probs = F.softmax(chunker_outputs["logits"], dim=-1)
+            # comp_count = ((chunker_inputs["labels"] == 1).float()).sum(dim=-1)
+            # comp_mass = probs[:, :, 1].sum(dim=-1) 
+            # reg_loss += ((comp_count - comp_mass)**2 / comp_count).mean()
+            bound_ratio = probs[:, :, 1].mean(dim=-1)
+            targ_bound_ratio = (chunker_inputs["labels"] == 1).sum(dim=-1) / chunker_inputs["labels"].shape[1]
+            reg_loss += ((bound_ratio - targ_bound_ratio)**2).mean()
             self.accelerator.wait_for_everyone()
+
         elif self.mask_mode == "contextless": 
             modded_ids_lst = []
             for i in range(inputs["attention_mask"].shape[0]):
@@ -1010,11 +1033,25 @@ class CompressTrainer(Trainer):
             all_comp_rates.add(mean_comp_rate)
 
             if step == 0: 
-                softmask = compute_soft_chunk_mask(chunk_probs, inputs["attention_mask"].shape[1], inputs["attention_mask"].shape[1])
-                softmask_ = softmask.detach().cpu().numpy()[0, 0]
-                plt.imshow(softmask.detach().cpu().numpy()[0, 0])
-                plt.title(f"Max: {softmask_.max()}, Min: {softmask_.min()}")
-                plt.savefig(os.path.join(self.args.output_dir, f"softmask-{self.state.global_step}.png"),dpi=300)
+                # softmask = compute_soft_chunk_mask(chunk_probs, inputs["attention_mask"].shape[1], inputs["attention_mask"].shape[1])
+                # softmask_ = softmask.detach().cpu().numpy()[0, 0]
+                # plt.imshow(softmask.detach().cpu().numpy()[0, 0])
+                # plt.title(f"Max: {softmask_.max()}, Min: {softmask_.min()}")
+                # plt.savefig(os.path.join(self.args.output_dir, f"softmask-{self.state.global_step}.png"),dpi=300)
+
+                if self.accelerator.is_main_process: 
+                    probs = F.gumbel_softmax(chunker_logits, hard=False)
+                    softmask = compute_soft_chunk_mask(probs, probs.shape[1], probs.shape[1])[0, 0]
+                    softmask *= inputs["attention_mask"][0][:, None] * inputs["attention_mask"][0][None, :] # mask out padding tokens
+                    plt.imshow(softmask.detach().cpu().numpy(), vmin=0.0, vmax=1.0)
+                    plt.savefig(os.path.join(self.args.output_dir, f"{self.state.global_step:05}-softmask.png"),dpi=300)
+
+                    one_hot = F.gumbel_softmax(chunker_logits, hard=True)
+                    hardmask = compute_soft_chunk_mask(one_hot, one_hot.shape[1], one_hot.shape[1])[0, 0]
+                    hardmask *= inputs["attention_mask"][0][:, None] * inputs["attention_mask"][0][None, :] # mask out padding tokens
+                    plt.imshow(hardmask.detach().cpu().numpy())
+                    plt.savefig(os.path.join(self.args.output_dir, f"{self.state.global_step:05}-hardmask.png"),dpi=300)
+                    plt.close()
                 pass
 
 

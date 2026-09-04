@@ -98,9 +98,16 @@ if __name__ == "__main__":
         save_strategy="steps", 
         save_steps=args.eval_steps, 
         remove_unused_columns=False, 
-        t_high=0.8, 
+        t_high=1.0, 
         t_low=0.2
     )
+
+    optimized_params = [
+        {"params": chunking_model.parameters()}
+        # {'params': chunking_model.classifier.parameters()},
+        # {'params': chunking_model.model.layers[-1].parameters()},  
+        # {'params': chunking_model.model.layers[-2].parameters()} 
+    ]
 
     trainer = ChunkerTrainer(
         model=chunking_model,
@@ -109,7 +116,7 @@ if __name__ == "__main__":
         train_dataset=trainset,
         eval_dataset=valset, 
         processing_class=tokenizer, 
-        optimizer_cls_and_kwargs=(AdamW, {"params": chunking_model.parameters(), "lr": args.lr, "weight_decay": args.l2})
+        optimizer_cls_and_kwargs=(AdamW, {"params": optimized_params, "lr": args.lr, "weight_decay": args.l2})
     )
 
     trainer.train()

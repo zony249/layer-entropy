@@ -247,6 +247,8 @@ if __name__ == "__main__":
     args = join_args(experiment_args, general_args)
 
 
+    if os.path.exists(args.output_dir):
+        shutil.rmtree(args.output_dir)
     os.makedirs(args.output_dir, exist_ok=True)
 
     # max_memory_mapping = {
@@ -254,7 +256,7 @@ if __name__ == "__main__":
     #     1: "30GiB",   
     # }
 
-    model = ZipQwen3ForCausalLM.from_pretrained(args.model, device_map="auto")
+    model = ZipQwen3ForCausalLM.from_pretrained(args.model, device_map="auto").to(torch.bfloat16)
     tok = AutoTokenizer.from_pretrained(args.model, padding_side="left")
 
     align_special_tokens(tok, model)
@@ -263,7 +265,7 @@ if __name__ == "__main__":
 
     entropy_model = None
 
-    chunking_model = Qwen3Chunker.from_pretrained(args.chunking_model, device_map="auto") if args.chunking_model is not None else None
+    chunking_model = Qwen3Chunker.from_pretrained(args.chunking_model, device_map="auto").to(torch.bfloat16) if args.chunking_model is not None else None
     valset = load_dataset("rajpurkar/squad_v2")["validation"]#.select(range(100))
 
 
@@ -343,15 +345,33 @@ if __name__ == "__main__":
         [print(p, "||", r["answers"]["text"][0] if len(r["answers"]["text"]) > 0 else "Not enough information.") for p, r in zip(preds_decoded, reference)]
         all_preds += preds_dict
         all_references += reference
-        # if idx > 10: 
-        #     break
+        if idx > 1000: 
+            break
         if idx%10 == 0:
             softmask = model.model.compute_soft_chunk_mask(chunk_signal, batch["attention_mask"].shape[1], batch["attention_mask"].shape[1])
             softmask = softmask.detach().cpu()[0, 0] # isolate just the first one of the batch 
             softmask *= batch["attention_mask"][0][:, None].cpu() * batch["attention_mask"][0][None, :].cpu() # mask out padding tokens
             plt.imshow(softmask.numpy())
-            plt.savefig(os.path.join(args.output_dir, f"visualization_{idx:04}.png"), dpi=300)
+            plt.savefig(os.path.join(args.output_dir, f"sample_{idx:04}_mask.png"), dpi=300)
             plt.close()
+
+
+            ctx_begin = (batch["attention_mask"][0] == 1).nonzero(as_tuple=False)[0].item()
+            token_type_labels = (chunk_signal[0][ctx_begin:, 1] >= 0.5)
+            tokens = tok.convert_ids_to_tokens(batch["input_ids"][0, ctx_begin:])
+
+            assert len(tokens) == len(token_type_labels), f"each token should be associated with a token type"
+            with open(os.path.join(args.output_dir, f"sample_{idx:04}_tokens.tsv"), "w") as f: 
+                f.write("token\ttype\n")
+                for k in range(len(tokens)): 
+                    f.write(f"{tokens[k]}\t{token_type_labels[k]}\n")
+
+                f.write("pred\treference\n") 
+                f.write(f'{preds_decoded[0]}\t{reference[0]["answers"]["text"][0] if len(reference[0]["answers"]["text"]) > 0 else "Not enough information."}\n')
+            
+
+            pass
+
         idx+=1 
 
 
@@ -362,9 +382,6 @@ if __name__ == "__main__":
     mean_comp_rate = torch.cat(all_comp_rates, dim=-1).mean().item()
     std_comp_rate = torch.std(torch.cat(all_comp_rates, dim=-1).flatten()).item()
 
-    if os.path.exists("runs/eval"):
-        shutil.rmtree("runs/eval")
-    os.makedirs("runs/eval", exist_ok=True)
     with open("runs/eval/preds.txt", "w") as f:
         for p in all_preds:
             f.write(p["prediction_text"] + "\n")

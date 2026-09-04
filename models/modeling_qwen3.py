@@ -861,6 +861,7 @@ class Qwen3Chunker(Qwen3PreTrainedModel, GenerationMixin):
 
         # Initialize weights and apply final processing
         self.post_init()
+        self.classifier = self.classifier.to(self.model.dtype)
 
     @can_return_tuple
     @auto_docstring
@@ -928,7 +929,7 @@ class Qwen3Chunker(Qwen3PreTrainedModel, GenerationMixin):
 
         loss = None
         if labels is not None:
-            loss = F.cross_entropy(input=logits.view(-1, 2), target=labels.view(-1), label_smoothing=0.8)
+            loss = F.cross_entropy(input=logits.view(-1, 2), target=labels.view(-1), label_smoothing=0.2)
             
 
         return CausalLMOutputWithPast(
@@ -1157,7 +1158,7 @@ class ZipQwen3Attention(nn.Module):
         if chunk_mask is not None: 
             pass
         
-        attn_weights = (attn_weights * chunk_mask.to(attn_weights.dtype).clamp(min=1e-8, max=1.0-1e-8))
+        attn_weights = (attn_weights * chunk_mask.to(attn_weights.dtype))
         attn_weights /= attn_weights.sum(dim=-1, keepdim=True)
         attn_output = torch.matmul(attn_weights, rep_value)
         attn_output = attn_output.transpose(1, 2).contiguous()
