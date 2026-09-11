@@ -50,11 +50,12 @@ SCHEDULER_NAME = "scheduler.pt"
 FSDP_MODEL_NAME = "pytorch_model_fsdp"
 
 from transformers.trainer import (
-    Trainer,
     nested_gather,
 )
 
 from transformers.training_args import TrainingArguments
+
+from trainer import Trainer
 
 
 @dataclass
@@ -216,6 +217,8 @@ class GistTrainer(Trainer):
         labels = None
         kwargs = {}
         kwargs["output_hidden_states"] = True
+        if num_items_in_batch is not None: 
+            kwargs["num_items_in_batch"] = num_items_in_batch
         inputs = {**inputs, **kwargs}
         outputs = model(**inputs)
 
