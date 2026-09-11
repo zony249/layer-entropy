@@ -33,6 +33,9 @@ def parse_exp_args() -> Namespace:
     parser.add_argument("--nltk_chunker", nargs="+", default=None, choices=[None, "np", "vp"])
     parser.add_argument("--alpha_unif", type=float, default=0)
 
+    parser.add_argument("--alpha_hid", default=0, type=float)
+    parser.add_argument("--full_context_model", type=str, default=None)
+
 
     args, unknown = parser.parse_known_args()
     return args

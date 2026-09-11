@@ -41,7 +41,7 @@ from utils import (
     compute_norm_of_diffs
 )
 from exp_args import parse_exp_args, join_args
-from utils import DefaultArgs
+from utils import DefaultArgs, GistDataCollator
 
 
 
@@ -295,21 +295,18 @@ if __name__ == "__main__":
     collator_args.chunking_model = chunking_model
     collator_args.nltk_chunker = nltk_chunker
 
+    collator = GistDataCollator(
+        tokenizer=tok,
+        gist_token_id=tok.convert_tokens_to_ids("<GIST>"),
+        add_thinking_tags=True,
+        collate_args=collator_args,
+        eval_mode=True
+    )
+
     dloader = DataLoader(valset,
                          batch_size=12,
                          shuffle=False,
-                         collate_fn=partial(collate_fn,
-                                            tokenizer=tok,
-                                            add_thinking_tags=True,
-                                            # add_gist=True,
-                                            # compression_rate=args.compression_rate,
-                                            # gist_scheme=args.gist_scheme,
-                                            # gist_granularity=args.gist_granularity,
-                                            # act_guided_chunking=args.act_guided_chunking,
-                                            # chunking_model=chunking_model,
-                                            # nltk_chunker=nltk_chunker
-                                            collator_args=collator_args
-                                            ))
+                         collate_fn=collator)
 
     accelerator = Accelerator()
     model, tok, dloader = accelerator.prepare(model, tok, dloader)
@@ -336,9 +333,12 @@ if __name__ == "__main__":
         preds_decoded = tok.batch_decode(torch.where(preds == -100, tok.pad_token_id, preds), skip_special_tokens=True)
         preds_decoded = [p.strip() for p in preds_decoded]
 
-        preds_dict = [{"prediction_text": p, "id": r["id"], "no_answer_probability": 1. if p == "Not enough information." else 0.} for p, r in zip(preds_decoded, reference)]
+        preds_dict = [{"prediction_text": p if p != "Not enough information." else "" , "id": r["id"], "no_answer_probability": 1. if p == "Not enough information." else 0.} for p, r in zip(preds_decoded, reference)]
         all_preds += preds_dict
         all_references += reference
+
+        for p, r in zip(preds_decoded, reference): 
+            print(p, "||", r["answers"]["text"][0] if len(r["answers"]["text"]) > 0 else "Not enough information.")
 
     all_preds = accelerator.gather_for_metrics(all_preds, True)
     all_references = accelerator.gather_for_metrics(all_references, True)
@@ -351,7 +351,7 @@ if __name__ == "__main__":
             f.write(p["prediction_text"] + "\n")
     with open("runs/eval/ref.txt", "w") as f:
         for r in all_references:
-            write_out = r["answers"]["text"][0] + "\n" if len(r["answers"]["text"]) > 0 else "Not enough info.\n"
+            write_out = r["answers"]["text"][0] + "\n" if len(r["answers"]["text"]) > 0 else "Not enough information.\n"
             f.write(write_out)
 
     squad_v2_metric = evaluate.load("squad_v2")

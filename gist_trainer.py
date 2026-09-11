@@ -1,9 +1,12 @@
 import os
 from typing import List, Dict, Union, Any, Optional, Tuple
 import wandb
+from dataclasses import dataclass
+from copy import deepcopy
 import torch
 from torch import nn
 
+from transformers import PreTrainedModel
 from transformers.utils import (
     is_datasets_available,
     is_in_notebook,
@@ -31,6 +34,8 @@ if is_in_notebook():
 if is_datasets_available():
     import datasets
 
+from models.compression_utils import find_downstream_hidden_states, find_idx
+
 
 logger = logging.get_logger(__name__)
 
@@ -47,8 +52,20 @@ FSDP_MODEL_NAME = "pytorch_model_fsdp"
 from transformers.trainer import (
     Trainer,
     nested_gather,
-
 )
+
+from transformers.training_args import TrainingArguments
+
+
+@dataclass
+class GistTrainingArguments(TrainingArguments): 
+    def __init__(self, 
+                alpha_hid: float = 0, 
+                full_context_model: PreTrainedModel | None = None, 
+                 *args, **kwargs): 
+        self.alpha_hid = alpha_hid 
+        self.full_context_model = full_context_model
+        super().__init__(*args, **kwargs)
 
 
 
@@ -58,6 +75,8 @@ class GistTrainer(Trainer):
                 *args,
                 **kwargs):
         super().__init__(*args, **kwargs)
+        self.teacher_model = self.args.full_context_model
+        self.alpha_hid = self.args.alpha_hid
         self.generate_kwargs = generate_kwargs if generate_kwargs is not None else {
             "max_new_tokens": 128,
             "do_sample": True,
@@ -104,9 +123,8 @@ class GistTrainer(Trainer):
             self._globalstep_last_logged = self.state.global_step
             self.store_flos()
             logs["compression_rate"] = self.data_collator.rate.item()
-            logs["chunk_diff_norm"] = self.data_collator.get_chunk_diff()
-            logs["uniform_chunk_diff_norm"] = self.data_collator.get_uniform_chunk_diff()
-            logs["multi_token_chunk_diff_norm"] = self.data_collator.get_multi_tok_chunk_diff()
+            logs["ce_loss"] = getattr(self.state, "ce_loss", None)
+            logs["hid_loss"] = getattr(self.state, "hid_loss", None)
 
             self.log(logs, start_time)
 
@@ -191,6 +209,70 @@ class GistTrainer(Trainer):
         #     if self.accelerator.is_main_process:
         #         wandb.log({"compression_rate": self.data_collator.rate.item()}, step=self.state.global_step)
 
+    def compute_loss(self, model, inputs, return_outputs = False, num_items_in_batch = None):
+
+        pc = getattr(self.accelerator, "parallelism_config", None)
+
+        labels = None
+        kwargs = {}
+        kwargs["output_hidden_states"] = True
+        inputs = {**inputs, **kwargs}
+        outputs = model(**inputs)
+
+        # Default HF loss handling (label smoothing) if no custom loss function
+        if isinstance(outputs, dict) and "loss" not in outputs:
+            raise ValueError(
+                "The model did not return a loss from the inputs, only the following keys: "
+                f"{','.join(outputs.keys())}. For reference, the inputs it received are {','.join(inputs.keys())}."
+            )
+        # We don't use .loss here since the model may return tuples instead of ModelOutput.
+        ce_loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
+
+
+        hid_loss = 0
+        # if self.alpha_hid > 0 and 
+        if torch.is_grad_enabled: 
+            assert self.teacher_model is not None, f"for intermediate-layer matching, full context model must be provided"
+            with torch.no_grad(): 
+                teacher_inputs = deepcopy(inputs)
+                teacher_inputs.pop("labels")
+                teacher_outputs = self.teacher_model(**teacher_inputs)
+            teacher_hidden_states = teacher_outputs["hidden_states"][-4:]
+            student_hidden_states = outputs["hidden_states"][-4:] 
+            # if self.accelerator.is_main_process: 
+            #     print("MAIN PROCESS T:", [h.device for h in teacher_hidden_states]) 
+            #     print("MAIN PROCESS S:", [h.device for h in outputs.hidden_states]) 
+            # else: 
+            #     print(f"PROCESS {self.accelerator.local_process_index} T", [h.device for h in teacher_hidden_states])
+            #     print(f"PROCESS {self.accelerator.local_process_index} S", [h.device for h in outputs.hidden_states])
+
+            gist_pos = find_idx(
+                input_ids=inputs["input_ids"],
+                token_id=self.processing_class.convert_tokens_to_ids("<GIST>")
+            )
+            teacher_hidden_states = find_downstream_hidden_states(teacher_hidden_states, gist_positions=gist_pos)
+            student_hidden_states = find_downstream_hidden_states(student_hidden_states, gist_positions=gist_pos)
+
+            hid_losses = [((t - s)**2/(t.norm(dim=-1, keepdim=True).sqrt() * s.norm(dim=-1, keepdim=True).sqrt())).mean() for t, s in zip(teacher_hidden_states, student_hidden_states)]
+            hid_loss = torch.stack(hid_losses).mean()
+
+            self.accelerator.wait_for_everyone()
+
+        loss = ce_loss + self.args.alpha_hid * hid_loss
+
+        self.state.ce_loss = ce_loss.item()
+        self.state.hid_loss = hid_loss.item()
+
+        if (
+            self.args.average_tokens_across_devices
+            and (self.model_accepts_loss_kwargs or self.compute_loss_func)
+            and num_items_in_batch is not None
+        ):
+            loss *= self.accelerator.num_processes if self.args.n_gpu <= 1 else self.args.n_gpu
+
+        if return_outputs: 
+            return loss, outputs 
+        return loss
 
     def prediction_step(
         self,

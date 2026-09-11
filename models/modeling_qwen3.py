@@ -608,23 +608,23 @@ class CompQwen3Model(Qwen3PreTrainedModel):
         if self.attention_mask_mode == "full": 
             mask_kwargs = {
                 "config": self.config,
-                "input_embeds": inputs_embeds,
+                "inputs_embeds": inputs_embeds,
                 "attention_mask": attention_mask,
                 "past_key_values": past_key_values,
                 "position_ids": position_ids,
             }
-            def causal_mask_wrapper(attention_mask, gist_idx): 
+            def causal_mask_wrapper(attention_mask, num_new_tokens, gist_idx): 
                 return create_causal_mask(**mask_kwargs)
-            def causal_mask_for_generation_wrapper(attention_mask, num_new_tokens, gist_idx): 
-                return create_causal_mask(**mask_kwargs)
+            # def causal_mask_for_generation_wrapper(attention_mask, num_new_tokens, gist_idx): 
+            #     return create_causal_mask(**mask_kwargs)
             full_attn_mask_func = causal_mask_wrapper
-            full_attn_mask_for_generation_func = causal_mask_for_generation_wrapper
+            # full_attn_mask_for_generation_func = causal_mask_for_generation_wrapper
         elif self.attention_mask_mode == "compression": 
             full_attn_mask_func = create_causal_gist_mask
-            full_attn_mask_for_generation_func = create_causal_gist_mask_for_generation
+            # full_attn_mask_for_generation_func = create_causal_gist_mask_for_generation
         elif self.attention_mask_mode == "contextless": 
             full_attn_mask_func = create_contextless_mask 
-            full_attn_mask_for_generation_func = create_contextless_mask_for_generation
+            # full_attn_mask_for_generation_func = create_contextless_mask_for_generation
 
 
         is_prefill = past_key_values.get_seq_length() == 0 if past_key_values is not None else True
@@ -633,23 +633,25 @@ class CompQwen3Model(Qwen3PreTrainedModel):
             if is_prefill:
                 # prefill stage, use causal_mask
                 self.gist_positions = find_idx(input_ids=input_ids, token_id=self.gist_token_id)
-                causal_mask_mapping = {
-                    "full_attention": full_attn_mask_func(attention_mask=attention_mask, 
-                                                              gist_idx=self.gist_positions)
-                }
-            else: 
+            causal_mask_mapping = {
+                "full_attention": full_attn_mask_func(attention_mask=attention_mask, 
+                                                        num_new_tokens=input_ids.shape[1], 
+                                                        gist_idx=self.gist_positions)
+            }
+            # else: 
                 #cache decoding stage
-                causal_mask_mapping = {
-                    "full_attention": full_attn_mask_for_generation_func(
-                        attention_mask=attention_mask, 
-                        num_new_tokens=input_ids.shape[1], 
-                        gist_idx=self.gist_positions)
-                    }
+                # causal_mask_mapping = {
+                #     "full_attention": full_attn_mask_for_generation_func(
+                #         attention_mask=attention_mask, 
+                #         num_new_tokens=input_ids.shape[1], 
+                #         gist_idx=self.gist_positions)
+                #     }
         else: 
             self.gist_positions = find_idx(input_ids=input_ids, token_id=self.gist_token_id)
             causal_mask_mapping = {
                 "full_attention": full_attn_mask_func(attention_mask=attention_mask, 
-                                                          gist_idx=self.gist_positions)
+                                                      num_new_tokens=input_ids.shape[1], 
+                                                      gist_idx=self.gist_positions)
             }
 
 

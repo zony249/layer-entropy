@@ -25,7 +25,7 @@ from transformers.trainer_utils import EvalPrediction
 import evaluate
 
 # from trainer import Trainer, TrainingArguments
-from gist_trainer import GistTrainer
+from gist_trainer import GistTrainer, GistTrainingArguments
 from accelerate import Accelerator
 
 from utils import GistDataCollator
@@ -48,19 +48,14 @@ def parse_training_args() -> Namespace:
 
 if __name__ == "__main__":
 
-    # try:
-    # debug_mode = int(os.environ["DEBUG_MODE"])
-    # if debug_mode > 0:
     # print("starting debugger")
     # if Accelerator().is_main_process:
     #     import debugpy
     #     debugpy.listen(("0.0.0.0", 5678))
     #     print("Waiting for debugger attach...")
     #     debugpy.wait_for_client()
-    # except:
-    #     pass
 
-    os.environ["WANDB_PROJECT"]="fourier-compression"
+    # os.environ["WANDB_PROJECT"]="fourier-compression"
 
 
     general_args = parse_training_args()
@@ -109,6 +104,13 @@ if __name__ == "__main__":
             rules += [RegexpChunkRule.fromstring("{<MD>?<RB.*>*<V.*>+}")]
         nltk_chunker = RegexpChunkParser(rules=rules)
 
+    full_context_model = None
+    if args.full_context_model is not None: 
+        full_context_model = CompQwen3ForCausalLM.from_pretrained(args.full_context_model, device_map="auto", torch_dtype=torch.bfloat16)
+        full_context_model.enable_compression(tokenizer)
+        full_context_model.set_attention_mask_mode("full")
+        full_context_model.set_intermediate_transform(mode="none", gist_scheme="dispersed")
+
 
     collator_args = deepcopy(args)
     collator_args.chunking_model = chunking_model
@@ -123,7 +125,8 @@ if __name__ == "__main__":
     task = Squad(
         list_splits=["train", "validation"],
         local_dir="squad-local",
-        load_local=False
+        load_local=False, 
+        preprocess_validation=True
     )
 
     trainset = task.get_dataset("train")
@@ -133,7 +136,7 @@ if __name__ == "__main__":
     # optim = AdamW(model.parameters(), 1e-7)
 
 
-    training_args = TrainingArguments(
+    training_args = GistTrainingArguments(
         output_dir=args.output_dir,
         # overwrite_output_dir=True,
         do_train=True,
@@ -155,7 +158,10 @@ if __name__ == "__main__":
         metric_for_best_model="loss",
         report_to="wandb",
         logging_steps=10,
-        train_sampling_strategy="random"
+        train_sampling_strategy="random", 
+        alpha_hid=args.alpha_hid, 
+        full_context_model=full_context_model,
+        eval_on_start=True, 
         # torch_empty_cache_steps=4,
         # eval_accumulation_steps=4,
         # predict_with_generate=True,

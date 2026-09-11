@@ -190,7 +190,53 @@ def create_causal_gist_mask_for_generation(attention_mask: torch.LongTensor,
     return torch.stack(causal_gist_mask, dim=0)[:, None, ...].bool() 
     
 
+
+def create_causal_gist_mask(
+    attention_mask: torch.LongTensor,
+    num_new_tokens: int, 
+    gist_idx: List[torch.LongTensor]
+) -> torch.BoolTensor: 
+
+    batch_size = attention_mask.shape[0] 
+    total_seq_len = attention_mask.shape[1] 
+    M_batched = torch.zeros((batch_size, num_new_tokens, total_seq_len), device=attention_mask.device)
+    
+    # P_batched: denotes token type
+    #   p = 0 if token is in chunk
+    #   p = 1 if token is gist or downstream 
+    P_batched = []
+    for i in range(batch_size): 
+        idxs = gist_idx[i] 
+        last_pos = idxs[-1] 
+        # everything after last gist is downstream
+        idxs = torch.cat((idxs, torch.arange(last_pos+1, total_seq_len, device=attention_mask.device)))
+        p = torch.zeros_like(attention_mask[i])
+        p[idxs] = 1
+        P_batched.append(p)
+        
+
+    for b, P in enumerate(P_batched): 
+        P = P.int() 
+        P_cumsum = P.cumsum(dim=-1) - P 
+        P_same = (P_cumsum[:, None] == P_cumsum[None, :]).int() #- (P[:, None] * P[None, :])
+        P_end = P[:, None] * P[None, :]
+        M = P_same  + (1-P_same) * P_end
+        M *= torch.tril(attention_mask[b][:, None] * attention_mask[b][None, :])
+        M_batched[b] = M[-num_new_tokens:]
+    return M_batched[:, None, :, :].bool()
+
+
+# def create_causal_gist_mask_for_generation(
+#         attention_mask: torch.LongTensor, 
+#         num_new_tokens: int, 
+#         gist_idx: List[torch.LongTensor]): 
+#     pass
+
+
+
+
 def create_contextless_mask(attention_mask: torch.LongTensor, 
+                            num_new_tokens:int, 
                             gist_idx: List[torch.LongTensor]) -> torch.BoolTensor: 
     causal_contextless_masks = [] 
     for i, attn_seq in enumerate(attention_mask): 
@@ -203,6 +249,7 @@ def create_contextless_mask(attention_mask: torch.LongTensor,
         questions_start = torch.max(positions) + 1
         mask = torch.tril(attn_seq[:, None] * attn_seq[None, :])
         mask[:, :questions_start] = 0
+        mask = mask[-num_new_tokens:]
         causal_contextless_masks.append(mask)
     
     return torch.stack(causal_contextless_masks, dim=0)[:, None, ...].bool() 
@@ -402,6 +449,29 @@ def disperse_position_ids(position_ids: torch.LongTensor,
         modified_pos_ids.append(pos_ids) 
     return torch.stack(modified_pos_ids) 
 
+
+def find_downstream_hidden_states(
+    all_hidden_states: Tuple[torch.Tensor],
+    gist_positions: List[torch.Tensor]
+) -> List[torch.Tensor]: 
+    """
+    all_hidden_states: Tuple[torch.Tensor[batch, seq_len, dim]]
+
+    returns: List[torch.Tensor[layers, downstream_len, dim]]
+    """
+
+    batches = [] 
+    for b in range(len(gist_positions)): 
+        gist_pos = gist_positions[b] 
+        downstream_start = gist_pos[-1] + 1 
+        layers = []
+        for h in all_hidden_states[1:]:
+            layers.append(h[b, downstream_start:, :]) 
+        layers = torch.stack(layers, dim=0)
+        batches.append(layers)
+
+    return batches
+     
 
 
 

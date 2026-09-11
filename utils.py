@@ -139,18 +139,20 @@ class GistDataCollator(DataCollatorMixin):
             self.tokenizer.bos_token = self.tokenizer.pad_token
 
         if self.attention_guided_chunking: 
-            pass
-            inputs = [example["context"] + "\n\nQuestion: " + example["question"] for example in batch]
-            contexts = [example["context"] for example in batch]
-            questions = ["\n\nQuestion: " + example["question"] for example in batch]
-            tok_outputs = self.tokenizer(inputs, return_tensors="pt", padding=True, padding_side="left")
-            contexts_unpadded: List = self.tokenizer(contexts)
-            questions_unpadded: List = self.tokenizer(questions)
-            tok_outputs_unpadded = contexts_unpadded
+            if False:
+                pass
+                inputs = [example["context"] + "\n\nQuestion: " + example["question"] for example in batch]
+                contexts = [example["context"] for example in batch]
+                questions = ["\n\nQuestion: " + example["question"] for example in batch]
+                tok_outputs = self.tokenizer(inputs, return_tensors="pt", padding=True, padding_side="left")
+                contexts_unpadded: List = self.tokenizer(contexts)
+                questions_unpadded: List = self.tokenizer(questions)
+                tok_outputs_unpadded = contexts_unpadded
         else:
             contexts = [example["context"] for example in batch]
             tok_outputs = self.tokenizer(contexts, return_tensors="pt", padding=True, padding_side="left")
             tok_outputs_unpadded = self.tokenizer(contexts)
+            contexts_unpadded: List = self.tokenizer(contexts)
         
 
         ####################################################
@@ -172,51 +174,55 @@ class GistDataCollator(DataCollatorMixin):
 
         act_signals: torch.Tensor | None = None
         if self.act_guided_chunking is not None:
-            if self.act_guided_chunking == "normdiff":
-                tok_outputs = tok_outputs.to(self.chunking_model.device)
-                inputs = {"input_ids": tok_outputs["input_ids"],
-                            "labels": tok_outputs["input_ids"],
-                            "attention_mask":  tok_outputs["attention_mask"]}
-                if self.chunking_model is not None:
-                    act_signals = compute_norm_of_diffs(inputs, self.chunking_model, None, self.act_guided_chunking)
-                else:
-                    raise ValueError("Chunking model not assigned")
+            if False:
+                if self.act_guided_chunking == "normdiff":
+                    tok_outputs = tok_outputs.to(self.chunking_model.device)
+                    inputs = {"input_ids": tok_outputs["input_ids"],
+                                "labels": tok_outputs["input_ids"],
+                                "attention_mask":  tok_outputs["attention_mask"]}
+                    if self.chunking_model is not None:
+                        act_signals = compute_norm_of_diffs(inputs, self.chunking_model, None, self.act_guided_chunking)
+                    else:
+                        raise ValueError("Chunking model not assigned")
 
         if self.act_guided_chunking is not None:
-            if self.act_guided_chunking == "min_chunk_diff":
-                assert self.chunking_model is not None, "Chunking model must be defined"
-                tok_outputs = tok_outputs.to(self.chunking_model.device)
-                inputs = {"input_ids": tok_outputs["input_ids"],
-                            "labels": tok_outputs["input_ids"],
-                            "attention_mask":  tok_outputs["attention_mask"]}
-                with torch.no_grad():
-                    outputs = self.chunking_model(**inputs, output_hidden_states=True)
-                    act_signals = torch.stack([outputs.hidden_states[i] for i in self.layer_selection], dim=0).mean(dim=0)
-                    del outputs
+            if False: 
+                if self.act_guided_chunking == "min_chunk_diff":
+                    assert self.chunking_model is not None, "Chunking model must be defined"
+                    tok_outputs = tok_outputs.to(self.chunking_model.device)
+                    inputs = {"input_ids": tok_outputs["input_ids"],
+                                "labels": tok_outputs["input_ids"],
+                                "attention_mask":  tok_outputs["attention_mask"]}
+                    with torch.no_grad():
+                        outputs = self.chunking_model(**inputs, output_hidden_states=True)
+                        act_signals = torch.stack([outputs.hidden_states[i] for i in self.layer_selection], dim=0).mean(dim=0)
+                        del outputs
 
         if self.act_guided_chunking is not None:
-            if self.act_guided_chunking == "reg_cosine":
-                assert self.chunking_model is not None, "Chunking model must be defined"
-                tok_outputs = tok_outputs.to(self.chunking_model.device)
-                inputs = {"input_ids": tok_outputs["input_ids"],
-                            "labels": tok_outputs["input_ids"],
-                            "attention_mask":  tok_outputs["attention_mask"]}
-                with torch.no_grad():
-                    outputs = self.chunking_model(**inputs, output_hidden_states=True)
-                    act_signals = torch.stack([outputs.hidden_states[i] for i in self.layer_selection], dim=0).mean(dim=0)
-                    del outputs
-                    # act_signals = torch.stack(outputs.hidden_states, dim=0).mean(dim=0)
+            if False: 
+                if self.act_guided_chunking == "reg_cosine":
+                    assert self.chunking_model is not None, "Chunking model must be defined"
+                    tok_outputs = tok_outputs.to(self.chunking_model.device)
+                    inputs = {"input_ids": tok_outputs["input_ids"],
+                                "labels": tok_outputs["input_ids"],
+                                "attention_mask":  tok_outputs["attention_mask"]}
+                    with torch.no_grad():
+                        outputs = self.chunking_model(**inputs, output_hidden_states=True)
+                        act_signals = torch.stack([outputs.hidden_states[i] for i in self.layer_selection], dim=0).mean(dim=0)
+                        del outputs
+                        # act_signals = torch.stack(outputs.hidden_states, dim=0).mean(dim=0)
         batch_attn_states = None 
         if self.attention_guided_chunking is not None: 
-            if self.attention_guided_chunking == "q-wise": 
-                assert self.chunking_model is not None, "Attention guided chunking requires a chunking model" 
-                batch_attn_states = compute_attention_states(
-                    model=self.chunking_model, 
-                    inputs=tok_outputs, 
-                    unpadded_contexts=contexts_unpadded, 
-                    unpadded_questions=questions_unpadded
-                )
-                pass
+            if False:
+                if self.attention_guided_chunking == "q-wise": 
+                    assert self.chunking_model is not None, "Attention guided chunking requires a chunking model" 
+                    batch_attn_states = compute_attention_states(
+                        model=self.chunking_model, 
+                        inputs=tok_outputs, 
+                        unpadded_contexts=contexts_unpadded, 
+                        unpadded_questions=questions_unpadded
+                    )
+                    pass
 
         ################################
         ##### NLTK GIST ASSIGNMENT #####
@@ -238,8 +244,8 @@ class GistDataCollator(DataCollatorMixin):
                 batch[i]["context"] = contexts[i]
             else:
                 #shorten surprise sequence, as we don't care about padding
-                len_seq = len(tok_outputs_unpadded["input_ids"][i])
-                padded_len = len(tok_outputs["input_ids"][i])
+                # len_seq = len(tok_outputs_unpadded["input_ids"][i])
+                # padded_len = len(tok_outputs["input_ids"][i])
                 unpadded_seq: List[int] =  contexts_unpadded["input_ids"][i] #tok_outputs["input_ids"][i][padded_len - len_seq:].tolist()
                 surprise = None # surprises[i][unpadded_len - len_seq:] if self.entropy_model is not None else None
                 act_sig: torch.Tensor | None = act_signals[i][padded_len - len_seq:] if act_signals is not None else None
