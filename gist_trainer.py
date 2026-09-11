@@ -229,9 +229,9 @@ class GistTrainer(Trainer):
         ce_loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
 
 
-        hid_loss = 0
+        hid_loss = torch.tensor(0, device=self.accelerator.device)
         # if self.alpha_hid > 0 and 
-        if torch.is_grad_enabled: 
+        if model.training: 
             assert self.teacher_model is not None, f"for intermediate-layer matching, full context model must be provided"
             with torch.no_grad(): 
                 teacher_inputs = deepcopy(inputs)
